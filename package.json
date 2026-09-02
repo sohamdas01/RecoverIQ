@@ -1,0 +1,24 @@
+{
+  "name": "recoveriq",
+  "version": "1.0.0",
+  "description": "RecoverIQ — Autonomous Payment & Subscription Recovery Platform",
+  "type": "module",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "db:generate": "drizzle-kit generate --config=./drizzle/drizzle.config.js",
+    "db:migrate": "drizzle-kit migrate --config=./drizzle/drizzle.config.js",
+    "db:push": "drizzle-kit push --config=./drizzle/drizzle.config.js",
+    "db:studio": "drizzle-kit studio --config=./drizzle/drizzle.config.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "drizzle-orm": "^0.38.4",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.30.2"
+  }
+}

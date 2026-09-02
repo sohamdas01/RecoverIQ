@@ -1,0 +1,39 @@
+{
+  "name": "recoveriq-backend",
+  "version": "1.0.0",
+  "description": "RecoverIQ Backend API & Orchestrator (Node.js + Express + JavaScript)",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "dev": "nodemon server.js",
+    "start": "node server.js",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio"
+  },
+  "keywords": [
+    "payment-recovery",
+    "guardrails",
+    "agentic-ai",
+    "razorpay"
+  ],
+  "author": "RecoverIQ Team",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.7.9",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "drizzle-orm": "^0.38.4",
+    "express": "^4.21.2",
+    "ioredis": "^5.4.2",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.13.1",
+    "uuid": "^11.0.5",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.30.2",
+    "nodemon": "^3.1.14"
+  }
+}
