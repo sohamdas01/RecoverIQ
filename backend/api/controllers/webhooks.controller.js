@@ -1,4 +1,4 @@
-import { IngestionService } from '../../services/ingestion/webhook-ingestion.service.js';
+import { EventProducerService } from '../../services/ingestion/event-producer.service.js';
 
 export async function handleRazorpayWebhook(req, res, next) {
   try {
@@ -25,11 +25,12 @@ export async function handleRazorpayWebhook(req, res, next) {
           razorpayOrderId: paymentEntity.order_id,
           rawError: paymentEntity.error_description,
         },
+        idempotencyKey: paymentEntity.id || eventBody.id,
         timestamp: new Date().toISOString(),
       };
 
-      const result = await IngestionService.processFailedPayment(failedEvent);
-      return res.status(200).json({ status: 'ok', processed: true, result });
+      const result = await EventProducerService.ingestAndPublishPaymentFailure(failedEvent);
+      return res.status(200).json({ status: 'ok', processed: true, queued: true, result });
     }
 
     return res.status(200).json({ status: 'ignored', message: 'Event not handled' });

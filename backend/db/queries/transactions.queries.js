@@ -45,6 +45,18 @@ export async function updateTransactionStatus(id, status, incrementAttempt = fal
   return updated;
 }
 
+export async function updateTransaction(id, updates) {
+  const [updated] = await db
+    .update(transactions)
+    .set({
+      ...updates,
+      updatedAt: new Date(),
+    })
+    .where(eq(transactions.id, id))
+    .returning();
+  return updated;
+}
+
 export async function getRecentTransactions(limit = 50) {
   return db
     .select({

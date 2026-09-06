@@ -1,4 +1,4 @@
-import { IngestionService } from '../../services/ingestion/webhook-ingestion.service.js';
+import { EventProducerService } from '../../services/ingestion/event-producer.service.js';
 
 export async function simulatePurchaseFailure(req, res, next) {
   try {
@@ -27,11 +27,11 @@ export async function simulatePurchaseFailure(req, res, next) {
       timestamp: new Date().toISOString(),
     };
 
-    const result = await IngestionService.processFailedPayment(event);
+    const result = await EventProducerService.ingestAndPublishPaymentFailure(event);
 
     return res.status(200).json({
       success: true,
-      message: 'Simulated purchase failure processed through RecoverIQ decision loop',
+      message: 'Simulated purchase failure published to Kafka queue for event-driven processing',
       data: result,
     });
   } catch (error) {
@@ -97,13 +97,14 @@ export async function simulateBatchFailures(req, res, next) {
         metadata: { simulated: true, trigger: 'batch_generator' },
         timestamp: new Date().toISOString(),
       };
-      const resItem = await IngestionService.processFailedPayment(event);
+      const resItem = await EventProducerService.ingestAndPublishPaymentFailure(event);
       results.push(resItem);
     }
 
     return res.status(200).json({
       success: true,
       processedCount: results.length,
+      queuedCount: results.length,
       data: results,
     });
   } catch (error) {
