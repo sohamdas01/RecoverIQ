@@ -36,11 +36,25 @@ export const config = {
     highValueThreshold: 20000.00,
   },
 
-  // Kafka Topics
+  // Kafka Topics & Consumer Groups
   kafka: {
-    brokers: (process.env.KAFKA_BROKERS || 'localhost:19092').split(','),
-    recoveryTopic: process.env.KAFKA_RECOVERY_TOPIC || 'recovery-events',
-    outcomeTopic: process.env.KAFKA_OUTCOME_TOPIC || 'outcome-events',
-    dlqTopic: process.env.KAFKA_DLQ_TOPIC || 'recovery-dlq',
+    brokers: (process.env.KAFKA_BROKERS || 'localhost:19092').split(',').map(b => b.trim()),
+    clientId: process.env.KAFKA_CLIENT_ID || 'recoveriq-backend',
+    paymentEventsTopic: process.env.KAFKA_PAYMENT_TOPIC || 'payment-events',
+    recoveryOutcomesTopic: process.env.KAFKA_OUTCOME_TOPIC || 'recovery-outcomes',
+    deadLetterTopic: process.env.KAFKA_DLQ_TOPIC || 'dead-letter-events',
+    recoveryWorkerGroup: process.env.KAFKA_RECOVERY_GROUP || 'recovery-worker-group',
+    outcomeWorkerGroup: process.env.KAFKA_OUTCOME_GROUP || 'outcome-worker-group',
+  },
+
+  // Retry & DLQ Configuration
+  retry: {
+    maxRetries: parseInt(process.env.RETRY_MAX_ATTEMPTS || '3', 10),
+    initialDelayMs: parseInt(process.env.RETRY_INITIAL_DELAY_MS || '100', 10),
+    maxDelayMs: parseInt(process.env.RETRY_MAX_DELAY_MS || '2000', 10),
+    backoffMultiplier: parseFloat(process.env.RETRY_BACKOFF_MULTIPLIER || '2'),
+    jitter: true,
+    entityRecheckRetries: parseInt(process.env.RETRY_ENTITY_RECHECK || '3', 10),
+    entityRecheckDelayMs: parseInt(process.env.RETRY_ENTITY_DELAY_MS || '100', 10),
   },
 };

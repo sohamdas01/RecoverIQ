@@ -94,3 +94,39 @@ export async function checkRateLimit(key, maxAttempts = 1, windowSeconds = 3600)
   memoryRateLimits.set(key, timestamps);
   return true;
 }
+
+/**
+ * Check and set idempotency key (returns true if first time, false if duplicate)
+ */
+export async function checkIdempotency(key, ttlSeconds = 86400) {
+  try {
+    if (isConnected) {
+      const result = await redis.set(key, '1', 'EX', ttlSeconds, 'NX');
+      return result === 'OK';
+    }
+  } catch (e) {}
+
+  const now = Date.now();
+  const existingExpiry = memoryLocks.get(key);
+  if (existingExpiry && existingExpiry > now) {
+    return false; // Duplicate
+  }
+  memoryLocks.set(key, now + ttlSeconds * 1000);
+  return true; // First time
+}
+
+/**
+ * Disconnect Redis client cleanly
+ */
+export async function disconnectRedis() {
+  try {
+    if (isConnected) {
+      await redis.quit();
+      isConnected = false;
+    }
+  } catch (e) {
+    try {
+      redis.disconnect();
+    } catch (_) {}
+  }
+}

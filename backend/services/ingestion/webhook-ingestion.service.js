@@ -1,24 +1,22 @@
-import axios from 'axios';
 import { findOrCreateCustomer } from '../../db/queries/customers.queries.js';
 import { createTransaction, getTransactionById, getCustomerStats } from '../../db/queries/transactions.queries.js';
-import { createDecision } from '../../db/queries/decisions.queries.js';
-import { createAction, updateActionResult } from '../../db/queries/actions.queries.js';
-import { GuardrailService } from '../guardrail/guardrail.service.js';
-import { executeTool } from '../tools/index.js';
-import { config } from '../config/index.js';
+import { RecoveryOrchestrator } from '../recovery/index.js';
+import { RecoveryAnalystClient } from '../agents/recovery-analyst.client.js';
+import { RecoveryExecutorClient } from '../agents/recovery-executor.client.js';
+import { getMLPrediction } from '../ml/index.js';
 
 export class IngestionService {
   /**
-   * Main entry point for processing a failed transaction event
+   * Main entry point for processing a failed transaction event directly via Webhook Ingestion
    */
   static async processFailedPayment(event) {
-    console.log(`[Ingestion] Ingesting failed payment for ${event.customer.email} (Amount: ${event.currency} ${event.amount}, Reason: ${event.failureReason})`);
+    console.log(`[Ingestion] Ingesting failed payment for ${event.customer?.email || 'unknown'} (Amount: ${event.currency || 'INR'} ${event.amount}, Reason: ${event.failureReason})`);
 
     // 1. Ensure Customer exists
     const customer = await findOrCreateCustomer({
-      name: event.customer.name,
-      email: event.customer.email,
-      phone: event.customer.phone,
+      name: event.customer?.name || 'Unknown Customer',
+      email: event.customer?.email || `customer_${Date.now()}@example.com`,
+      phone: event.customer?.phone,
     });
 
     // 2. Record Failed Transaction
@@ -36,103 +34,12 @@ export class IngestionService {
     // 3. Extract Customer Historical Profile
     const customerStats = await getCustomerStats(customer.id);
 
-    // 4. Request ML Recovery Probability & SHAP Explainability from ML Service
-    const mlPrediction = await IngestionService.getMLPrediction({
-      amount: parseFloat(transaction.amount),
-      payment_method: transaction.paymentMethod,
-      failure_reason: transaction.failureReason,
-      attempt_count: transaction.attemptCount,
-      days_since_failure: 0.0,
-      day_of_month: new Date().getDate(),
-      hour_of_day: new Date().getHours(),
-      previous_successes: customerStats.previousSuccesses,
-      previous_failures: customerStats.previousFailures,
-      previous_recovery_success: customerStats.previousRecoverySuccess,
-      is_subscription: transaction.paymentMethod === 'subscription_mandate',
+    // 4. Delegate to RecoveryOrchestrator (ML -> Agent 1 -> Agent 2 -> Policy Engine -> Execution Gate -> Decision DB)
+    const orchestration = await RecoveryOrchestrator.orchestrateRecovery({
+      transaction,
+      customer,
+      customerStats,
     });
-
-    console.log(`[ML Service] Recovery Probability: ${(mlPrediction.probability * 100).toFixed(1)}% | Reasons: [${mlPrediction.reason_codes.join(', ')}]`);
-
-    // 5. Consult Agent Decision Layer (Pass ML Score and Grounded Reasons)
-    const recommendation = await IngestionService.getAgentRecommendation({
-      transactionId: transaction.id,
-      customerName: customer.name,
-      customerEmail: customer.email,
-      amount: parseFloat(transaction.amount),
-      currency: transaction.currency,
-      paymentMethod: transaction.paymentMethod,
-      failureReason: transaction.failureReason,
-      attemptCount: transaction.attemptCount,
-      mlScore: mlPrediction.probability,
-      mlReasonCodes: mlPrediction.reason_codes,
-    });
-
-    // 6. Evaluate Guardrail & Policy Engine (Rule 3: Backend owns security/guardrails)
-    const guardrailCheck = GuardrailService.evaluate({
-      transactionId: transaction.id,
-      amount: parseFloat(transaction.amount),
-      currency: transaction.currency,
-      status: transaction.status,
-      failureReason: transaction.failureReason,
-      attemptCount: transaction.attemptCount,
-      recommendedAction: recommendation.action,
-      toolParams: recommendation.toolParams,
-      mlScore: mlPrediction.probability,
-    });
-
-    console.log(`[Guardrail] Result for ${transaction.id}: ${guardrailCheck.decision} — ${guardrailCheck.reason}`);
-
-    // 7. Persist Decision with ML Score & SHAP Metadata
-    const decision = await createDecision({
-      transactionId: transaction.id,
-      agentAnalystResponse: {
-        confidence: recommendation.confidence,
-        rawReasoning: recommendation.reasoning,
-        suggestedTool: recommendation.action,
-        toolParams: recommendation.toolParams,
-        appliedRules: guardrailCheck.appliedRules,
-        playbookStrategy: recommendation.playbookStrategy || null,
-        mlReasonCodes: mlPrediction.reason_codes,
-        mlModelVersion: mlPrediction.model_version,
-        mlAttributions: mlPrediction.attributions || [],
-      },
-      mlScore: mlPrediction.probability,
-      recommendedAction: recommendation.action,
-      guardrailResult: guardrailCheck.decision,
-      finalAction: guardrailCheck.decision === 'ALLOW' ? recommendation.action : undefined,
-      reasoning: recommendation.reasoning + ` | Guardrail: ${guardrailCheck.reason}`,
-      status: guardrailCheck.decision === 'ALLOW' ? 'executed' : guardrailCheck.decision === 'REQUIRE_APPROVAL' ? 'pending_review' : 'blocked',
-    });
-
-
-    // 6. Action Execution (if ALLOWed by Guardrails)
-    let executionResult = null;
-    if (guardrailCheck.decision === 'ALLOW') {
-      const actionRecord = await createAction({
-        decisionId: decision.id,
-        toolName: recommendation.action,
-        toolParams: {
-          ...recommendation.toolParams,
-          transactionId: transaction.id,
-          amount: parseFloat(transaction.amount),
-          currency: transaction.currency,
-        },
-        status: 'pending',
-      });
-
-      executionResult = await executeTool(recommendation.action, {
-        ...recommendation.toolParams,
-        transactionId: transaction.id,
-        amount: parseFloat(transaction.amount),
-        currency: transaction.currency,
-      });
-
-      await updateActionResult(
-        actionRecord.id,
-        executionResult.success ? 'success' : 'failed',
-        executionResult.output || {}
-      );
-    }
 
     const updatedTx = await getTransactionById(transaction.id);
 
@@ -140,9 +47,10 @@ export class IngestionService {
       success: true,
       transaction: updatedTx?.transaction || transaction,
       customer,
-      decision,
-      guardrail: guardrailCheck,
-      executionResult,
+      decision: orchestration.decision,
+      guardrail: orchestration.policyResult,
+      policyResult: orchestration.policyResult,
+      executionResult: orchestration.executionResult,
     };
   }
 
@@ -150,64 +58,57 @@ export class IngestionService {
    * Request recovery probability and SHAP reason codes from ML Service
    */
   static async getMLPrediction(payload) {
-    try {
-      const response = await axios.post(
-        `${config.mlServiceUrl}/predict`,
-        payload,
-        { timeout: 3000 }
-      );
-      if (response.data && typeof response.data.probability === 'number') {
-        return response.data;
-      }
-    } catch (err) {
-      console.warn(`[Ingestion] ML service unreachable (${err.message}). Using built-in baseline probability heuristics.`);
-    }
-
-    // Heuristic ML fallback in case ML service is offline
-    const reason = payload.failure_reason;
-    let fallbackProb = 0.72;
-    let fallbackReasons = ['baseline_heuristic_estimate'];
-
-    if (reason === 'high_risk_fraud') {
-      fallbackProb = 0.05;
-      fallbackReasons = ['high_risk_fraud_flagged'];
-    } else if (reason === 'card_expired') {
-      fallbackProb = 0.45;
-      fallbackReasons = ['hard_decline_expired_card'];
-    } else if (reason === 'bank_outage' || reason === 'network_timeout') {
-      fallbackProb = 0.88;
-      fallbackReasons = ['transient_infrastructure_glitch'];
-    } else if (payload.previous_successes > 5) {
-      fallbackProb = 0.82;
-      fallbackReasons = ['strong_payment_history'];
-    }
-
-    return {
-      probability: fallbackProb,
-      reason_codes: fallbackReasons,
-      model_version: 'v1.0.0-fallback',
-      attributions: [],
-    };
+    return getMLPrediction(payload);
   }
 
   /**
-   * Request decision from GenAI Service with robust fallback
+   * Request structured recovery analysis from Agent 1 (Recovery Analyst)
+   */
+  static async getAgent1Recommendation({ transaction, customer, customerStats, mlPrediction }) {
+    return RecoveryAnalystClient.analyze({
+      transaction,
+      customer,
+      customerStats,
+      mlPrediction,
+    });
+  }
+
+  /**
+   * Request structured Action Plan proposal from Agent 2 (Recovery Executor)
+   */
+  static async getAgent2ActionPlan({ transaction, customer, customerStats, mlPrediction, agent1Recommendation }) {
+    return RecoveryExecutorClient.plan({
+      transaction,
+      customer,
+      customerStats,
+      mlPrediction,
+      agent1Recommendation,
+    });
+  }
+
+  /**
+   * Request decision from Agent 1 with robust fallback (backwards compatibility)
    */
   static async getAgentRecommendation(txPayload) {
-    try {
-      const response = await axios.post(
-        `${config.genaiServiceUrl}/analyze`,
-        txPayload,
-        { timeout: 3500 }
-      );
-      if (response.data && response.data.action) {
-        return response.data;
-      }
-    } catch (err) {
-      console.warn(`[Ingestion] GenAI service unavailable (${err.message}). Using built-in Phase 1 decision heuristics.`);
-    }
-
-    return IngestionService.fallbackHeuristicDecision(txPayload);
+    return RecoveryAnalystClient.analyze({
+      transaction: {
+        id: txPayload.transactionId,
+        amount: txPayload.amount,
+        currency: txPayload.currency || 'INR',
+        paymentMethod: txPayload.paymentMethod,
+        failureReason: txPayload.failureReason,
+        attemptCount: txPayload.attemptCount || 1,
+      },
+      customer: {
+        name: txPayload.customerName,
+        email: txPayload.customerEmail,
+      },
+      customerStats: {},
+      mlPrediction: txPayload.mlScore !== undefined ? {
+        probability: txPayload.mlScore,
+        reason_codes: txPayload.mlReasonCodes || [],
+      } : null,
+    });
   }
 
   /**
