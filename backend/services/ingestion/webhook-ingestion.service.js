@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { findOrCreateCustomer } from '../../db/queries/customers.queries.js';
-import { createTransaction, getTransactionById } from '../../db/queries/transactions.queries.js';
+import { createTransaction, getTransactionById, getCustomerStats } from '../../db/queries/transactions.queries.js';
 import { createDecision } from '../../db/queries/decisions.queries.js';
 import { createAction, updateActionResult } from '../../db/queries/actions.queries.js';
 import { GuardrailService } from '../guardrail/guardrail.service.js';
@@ -33,7 +33,27 @@ export class IngestionService {
       metadata: event.metadata || {},
     });
 
-    // 3. Consult Agent Decision Layer
+    // 3. Extract Customer Historical Profile
+    const customerStats = await getCustomerStats(customer.id);
+
+    // 4. Request ML Recovery Probability & SHAP Explainability from ML Service
+    const mlPrediction = await IngestionService.getMLPrediction({
+      amount: parseFloat(transaction.amount),
+      payment_method: transaction.paymentMethod,
+      failure_reason: transaction.failureReason,
+      attempt_count: transaction.attemptCount,
+      days_since_failure: 0.0,
+      day_of_month: new Date().getDate(),
+      hour_of_day: new Date().getHours(),
+      previous_successes: customerStats.previousSuccesses,
+      previous_failures: customerStats.previousFailures,
+      previous_recovery_success: customerStats.previousRecoverySuccess,
+      is_subscription: transaction.paymentMethod === 'subscription_mandate',
+    });
+
+    console.log(`[ML Service] Recovery Probability: ${(mlPrediction.probability * 100).toFixed(1)}% | Reasons: [${mlPrediction.reason_codes.join(', ')}]`);
+
+    // 5. Consult Agent Decision Layer (Pass ML Score and Grounded Reasons)
     const recommendation = await IngestionService.getAgentRecommendation({
       transactionId: transaction.id,
       customerName: customer.name,
@@ -43,9 +63,11 @@ export class IngestionService {
       paymentMethod: transaction.paymentMethod,
       failureReason: transaction.failureReason,
       attemptCount: transaction.attemptCount,
+      mlScore: mlPrediction.probability,
+      mlReasonCodes: mlPrediction.reason_codes,
     });
 
-    // 4. Evaluate Guardrail & Policy Engine (Rule 3: Backend owns security/guardrails)
+    // 6. Evaluate Guardrail & Policy Engine (Rule 3: Backend owns security/guardrails)
     const guardrailCheck = GuardrailService.evaluate({
       transactionId: transaction.id,
       amount: parseFloat(transaction.amount),
@@ -55,12 +77,12 @@ export class IngestionService {
       attemptCount: transaction.attemptCount,
       recommendedAction: recommendation.action,
       toolParams: recommendation.toolParams,
-      mlScore: recommendation.mlScore,
+      mlScore: mlPrediction.probability,
     });
 
     console.log(`[Guardrail] Result for ${transaction.id}: ${guardrailCheck.decision} — ${guardrailCheck.reason}`);
 
-    // 5. Persist Decision
+    // 7. Persist Decision with ML Score & SHAP Metadata
     const decision = await createDecision({
       transactionId: transaction.id,
       agentAnalystResponse: {
@@ -70,14 +92,18 @@ export class IngestionService {
         toolParams: recommendation.toolParams,
         appliedRules: guardrailCheck.appliedRules,
         playbookStrategy: recommendation.playbookStrategy || null,
+        mlReasonCodes: mlPrediction.reason_codes,
+        mlModelVersion: mlPrediction.model_version,
+        mlAttributions: mlPrediction.attributions || [],
       },
-      mlScore: recommendation.mlScore || 0.75,
+      mlScore: mlPrediction.probability,
       recommendedAction: recommendation.action,
       guardrailResult: guardrailCheck.decision,
       finalAction: guardrailCheck.decision === 'ALLOW' ? recommendation.action : undefined,
       reasoning: recommendation.reasoning + ` | Guardrail: ${guardrailCheck.reason}`,
       status: guardrailCheck.decision === 'ALLOW' ? 'executed' : guardrailCheck.decision === 'REQUIRE_APPROVAL' ? 'pending_review' : 'blocked',
     });
+
 
     // 6. Action Execution (if ALLOWed by Guardrails)
     let executionResult = null;
@@ -117,6 +143,50 @@ export class IngestionService {
       decision,
       guardrail: guardrailCheck,
       executionResult,
+    };
+  }
+
+  /**
+   * Request recovery probability and SHAP reason codes from ML Service
+   */
+  static async getMLPrediction(payload) {
+    try {
+      const response = await axios.post(
+        `${config.mlServiceUrl}/predict`,
+        payload,
+        { timeout: 3000 }
+      );
+      if (response.data && typeof response.data.probability === 'number') {
+        return response.data;
+      }
+    } catch (err) {
+      console.warn(`[Ingestion] ML service unreachable (${err.message}). Using built-in baseline probability heuristics.`);
+    }
+
+    // Heuristic ML fallback in case ML service is offline
+    const reason = payload.failure_reason;
+    let fallbackProb = 0.72;
+    let fallbackReasons = ['baseline_heuristic_estimate'];
+
+    if (reason === 'high_risk_fraud') {
+      fallbackProb = 0.05;
+      fallbackReasons = ['high_risk_fraud_flagged'];
+    } else if (reason === 'card_expired') {
+      fallbackProb = 0.45;
+      fallbackReasons = ['hard_decline_expired_card'];
+    } else if (reason === 'bank_outage' || reason === 'network_timeout') {
+      fallbackProb = 0.88;
+      fallbackReasons = ['transient_infrastructure_glitch'];
+    } else if (payload.previous_successes > 5) {
+      fallbackProb = 0.82;
+      fallbackReasons = ['strong_payment_history'];
+    }
+
+    return {
+      probability: fallbackProb,
+      reason_codes: fallbackReasons,
+      model_version: 'v1.0.0-fallback',
+      attributions: [],
     };
   }
 

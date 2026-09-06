@@ -27,9 +27,34 @@ export default function MerchantDashboardPage() {
   };
 
   useEffect(() => {
-    loadData();
-    const interval = setInterval(loadData, 5000);
-    return () => clearInterval(interval);
+    let isMounted = true;
+
+    async function initialize() {
+      try {
+        const [txRes, decRes] = await Promise.all([
+          fetchTransactions(),
+          fetchDecisions(true),
+        ]);
+        if (isMounted) {
+          if (txRes.success) setTransactions(txRes.data);
+          if (decRes.success) setPendingDecisions(decRes.data);
+          setLoading(false);
+        }
+      } catch (err) {
+        console.error('Error fetching dashboard data:', err);
+        if (isMounted) setLoading(false);
+      }
+    }
+
+    initialize();
+    const interval = setInterval(() => {
+      loadData();
+    }, 5000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, []);
 
   const handleReview = async (decisionId, action) => {
@@ -163,6 +188,21 @@ export default function MerchantDashboardPage() {
                         </span>
                       )}
                     </div>
+
+                    {/* ML Score & Reason Codes */}
+                    {item.decision?.mlScore !== undefined && item.decision?.mlScore !== null && (
+                      <div className="flex items-center justify-between text-[11px] pt-0.5 pb-0.5">
+                        <span className="text-slate-400">
+                          ML Recovery Likelihood: <strong className="text-indigo-300 font-mono">{(item.decision.mlScore * 100).toFixed(0)}%</strong>
+                        </span>
+                        {item.decision?.agentAnalystResponse?.mlReasonCodes?.length > 0 && (
+                          <span className="text-[10px] text-slate-500 font-mono">
+                            {item.decision.agentAnalystResponse.mlReasonCodes.slice(0, 2).map(c => `#${c}`).join(' ')}
+                          </span>
+                        )}
+                      </div>
+                    )}
+
                     {item.decision?.agentAnalystResponse?.playbookStrategy?.title && (
                       <p className="text-[11px] text-indigo-300 font-medium">
                         📚 Strategy: {item.decision.agentAnalystResponse.playbookStrategy.title}
