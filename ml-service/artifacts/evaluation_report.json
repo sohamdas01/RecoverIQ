@@ -1,0 +1,110 @@
+{
+  "dataset_size": 2250,
+  "classification_metrics": {
+    "roc_auc": 0.8171521192933873,
+    "accuracy": 0.7964444444444444,
+    "precision": 0.8118918918918919,
+    "recall": 0.9317617866004962,
+    "f1_score": 0.8677065280184865,
+    "brier_score_loss": 0.14262010157108307
+  },
+  "confusion_matrix": {
+    "true_negative": 290,
+    "false_positive": 348,
+    "false_negative": 110,
+    "true_positive": 1502
+  },
+  "calibration_deciles": [
+    {
+      "bin_range": "0.0-0.1",
+      "count": 68,
+      "mean_predicted_prob": 0.0718,
+      "actual_positive_rate": 0.0294,
+      "calibration_gap": 0.0424
+    },
+    {
+      "bin_range": "0.1-0.2",
+      "count": 65,
+      "mean_predicted_prob": 0.1467,
+      "actual_positive_rate": 0.0923,
+      "calibration_gap": 0.0544
+    },
+    {
+      "bin_range": "0.2-0.3",
+      "count": 51,
+      "mean_predicted_prob": 0.2499,
+      "actual_positive_rate": 0.1569,
+      "calibration_gap": 0.093
+    },
+    {
+      "bin_range": "0.3-0.4",
+      "count": 81,
+      "mean_predicted_prob": 0.3533,
+      "actual_positive_rate": 0.4074,
+      "calibration_gap": 0.0541
+    },
+    {
+      "bin_range": "0.4-0.5",
+      "count": 135,
+      "mean_predicted_prob": 0.4515,
+      "actual_positive_rate": 0.4519,
+      "calibration_gap": 0.0004
+    },
+    {
+      "bin_range": "0.5-0.6",
+      "count": 181,
+      "mean_predicted_prob": 0.5529,
+      "actual_positive_rate": 0.5635,
+      "calibration_gap": 0.0107
+    },
+    {
+      "bin_range": "0.6-0.7",
+      "count": 189,
+      "mean_predicted_prob": 0.6508,
+      "actual_positive_rate": 0.6402,
+      "calibration_gap": 0.0106
+    },
+    {
+      "bin_range": "0.7-0.8",
+      "count": 356,
+      "mean_predicted_prob": 0.7558,
+      "actual_positive_rate": 0.7331,
+      "calibration_gap": 0.0227
+    },
+    {
+      "bin_range": "0.8-0.9",
+      "count": 687,
+      "mean_predicted_prob": 0.8532,
+      "actual_positive_rate": 0.8894,
+      "calibration_gap": 0.0362
+    },
+    {
+      "bin_range": "0.9-1.0",
+      "count": 437,
+      "mean_predicted_prob": 0.9274,
+      "actual_positive_rate": 0.9314,
+      "calibration_gap": 0.0039
+    }
+  ],
+  "comparison_vs_naive_baseline": {
+    "naive_baseline": {
+      "attempts": 2250,
+      "recoveries": 1612,
+      "success_rate": 0.7164444444444444,
+      "recovered_revenue_inr": 5826461.33,
+      "operational_cost_inr": 33750.0,
+      "net_recovered_value_inr": 5792711.33
+    },
+    "model_guided": {
+      "threshold": 0.5,
+      "attempts": 1850,
+      "recoveries": 1502,
+      "success_rate": 0.8118918918918919,
+      "recovered_revenue_inr": 5324964.7299999995,
+      "operational_cost_inr": 27750.0,
+      "net_recovered_value_inr": 5297214.7299999995,
+      "futile_attempts_avoided": 400,
+      "operational_savings_inr": 6000.0
+    }
+  }
+}

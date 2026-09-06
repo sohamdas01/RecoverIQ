@@ -56,3 +56,30 @@ export async function getRecentTransactions(limit = 50) {
     .orderBy(desc(transactions.createdAt))
     .limit(limit);
 }
+
+export async function getCustomerStats(customerId) {
+  const customerTxs = await db
+    .select()
+    .from(transactions)
+    .where(eq(transactions.customerId, customerId));
+
+  let previousSuccesses = 0;
+  let previousFailures = 0;
+  let previousRecoverySuccess = false;
+
+  for (const tx of customerTxs) {
+    if (tx.status === 'recovered' || tx.status === 'success') {
+      previousSuccesses += 1;
+      previousRecoverySuccess = true;
+    } else if (tx.status === 'failed' || tx.status === 'abandoned') {
+      previousFailures += 1;
+    }
+  }
+
+  return {
+    previousSuccesses,
+    previousFailures,
+    previousRecoverySuccess,
+  };
+}
+

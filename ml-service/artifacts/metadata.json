@@ -1,0 +1,48 @@
+{
+  "model_version": "v1.0.0",
+  "algorithm": "XGBClassifier",
+  "created_at": "2026-09-02T09:22:42.582600Z",
+  "random_seed": 42,
+  "feature_names": [
+    "log_amount",
+    "attempt_count",
+    "days_since_failure",
+    "previous_successes",
+    "previous_failures",
+    "previous_recovery_success",
+    "is_subscription",
+    "total_history",
+    "historical_success_rate",
+    "is_salary_window",
+    "is_business_hours",
+    "payment_method_card",
+    "payment_method_upi",
+    "payment_method_netbanking",
+    "payment_method_subscription_mandate",
+    "failure_reason_insufficient_funds",
+    "failure_reason_card_expired",
+    "failure_reason_bank_outage",
+    "failure_reason_network_timeout",
+    "failure_reason_authentication_failed",
+    "failure_reason_high_risk_fraud"
+  ],
+  "hyperparameters": {
+    "n_estimators": 150,
+    "max_depth": 4,
+    "learning_rate": 0.08,
+    "subsample": 0.85,
+    "colsample_bytree": 0.85,
+    "best_iteration": 75
+  },
+  "training_dataset": {
+    "num_train_samples": 10500,
+    "num_val_samples": 2250,
+    "train_recovery_rate": 0.7135238095238096,
+    "val_recovery_rate": 0.7128888888888889
+  },
+  "validation_metrics": {
+    "roc_auc": 0.7964164665735043,
+    "accuracy": 0.7782222222222223,
+    "log_loss": 0.46906813979148865
+  }
+}

@@ -274,9 +274,9 @@ export default function SimulatePage() {
                   </div>
                 </div>
 
-                {/* Agent & Guardrail Reasoning */}
+                {/* Agent, ML & Guardrail Reasoning */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="p-4 bg-slate-950 rounded-lg border border-slate-800/80 space-y-2">
+                  <div className="p-4 bg-slate-950 rounded-lg border border-slate-800/80 space-y-2.5">
                     <div className="flex items-center justify-between">
                       <span className="text-xs uppercase font-semibold text-indigo-400 tracking-wider">Agent Diagnosis (RAG)</span>
                       {result.decision?.agentAnalystResponse?.playbookStrategy?.ruleCode && (
@@ -287,6 +287,44 @@ export default function SimulatePage() {
                     </div>
 
                     <p className="text-sm font-semibold text-white">Action: {result.decision?.recommendedAction}</p>
+
+                    {/* ML Score & SHAP Reason Codes Card */}
+                    {result.decision?.mlScore !== undefined && result.decision?.mlScore !== null && (
+                      <div className="p-2.5 bg-slate-900 border border-slate-800 rounded-md space-y-1.5">
+                        <div className="flex justify-between items-center text-xs">
+                          <span className="text-slate-300 font-semibold flex items-center gap-1.5">
+                            <span>🤖 ML Recovery Score:</span>
+                            <span
+                              className={`px-2 py-0.5 rounded font-bold font-mono text-[11px] ${
+                                result.decision.mlScore >= 0.70
+                                  ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                                  : result.decision.mlScore >= 0.40
+                                  ? 'bg-amber-950 text-amber-400 border border-amber-800'
+                                  : 'bg-rose-950 text-rose-400 border border-rose-800'
+                              }`}
+                            >
+                              {(result.decision.mlScore * 100).toFixed(1)}%
+                            </span>
+                          </span>
+                          <span className="text-[10px] text-slate-500 font-mono">
+                            {result.decision?.agentAnalystResponse?.mlModelVersion || 'v1.0.0'}
+                          </span>
+                        </div>
+
+                        {result.decision?.agentAnalystResponse?.mlReasonCodes?.length > 0 && (
+                          <div className="flex flex-wrap gap-1 pt-0.5">
+                            {result.decision.agentAnalystResponse.mlReasonCodes.map((code, idx) => (
+                              <span
+                                key={idx}
+                                className="text-[10px] bg-indigo-950/70 text-indigo-300 border border-indigo-800/50 px-1.5 py-0.5 rounded font-mono"
+                              >
+                                #{code}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
 
                     {result.decision?.agentAnalystResponse?.playbookStrategy && (
                       <div className="p-2.5 bg-slate-900 border border-indigo-900/40 rounded-md text-xs space-y-1">
