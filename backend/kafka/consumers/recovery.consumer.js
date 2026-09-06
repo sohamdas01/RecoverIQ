@@ -9,11 +9,7 @@ import {
 } from '../schemas/events.schema.js';
 import { publishOutcomeEvent } from '../producer.js';
 import { getTransactionById, getCustomerStats } from '../../db/queries/transactions.queries.js';
-import { createDecision } from '../../db/queries/decisions.queries.js';
-import { createAction, updateActionResult } from '../../db/queries/actions.queries.js';
-import { GuardrailService } from '../../services/guardrail/guardrail.service.js';
-import { IngestionService } from '../../services/ingestion/webhook-ingestion.service.js';
-import { executeTool } from '../../services/tools/index.js';
+import { RecoveryOrchestrator } from '../../services/recovery/index.js';
 import { checkIdempotency } from '../../redis/redis.client.js';
 import {
   isTransientError,
@@ -113,7 +109,7 @@ export async function processPaymentMessage({ topic, partition, message, consume
       };
     }
 
-    // 4. Bounded Recheck for Authoritative State in PostgreSQL (Correction 1: Account for race conditions)
+    // 4. Bounded Recheck for Authoritative State in PostgreSQL
     const entityRecheckRetries = retryConfig.entityRecheckRetries !== undefined ? retryConfig.entityRecheckRetries : (config.retry?.entityRecheckRetries || 3);
     const entityRecheckDelayMs = retryConfig.entityRecheckDelayMs !== undefined ? retryConfig.entityRecheckDelayMs : (config.retry?.entityRecheckDelayMs || 100);
 
@@ -171,170 +167,22 @@ export async function processPaymentMessage({ topic, partition, message, consume
 
     const { transaction, customer } = txData;
 
-    // 5-11. Execute Recovery Pipeline with Transient Error Retries
+    // 5. Execute Recovery Pipeline via RecoveryOrchestrator with Transient Error Retries
     const pipelineResult = await executeWithRetry(
       async (attempt) => {
-        // 5. Extract Customer Historical Profile
         const customerStats = await getCustomerStats(customer.id);
 
-        // 6. Request ML Recovery Probability & SHAP Explainability (Phase 3 Integration)
-        const mlPrediction = await IngestionService.getMLPrediction({
-          amount: parseFloat(transaction.amount),
-          payment_method: transaction.paymentMethod,
-          failure_reason: transaction.failureReason,
-          attempt_count: transaction.attemptCount,
-          days_since_failure: 0.0,
-          day_of_month: new Date().getDate(),
-          hour_of_day: new Date().getHours(),
-          previous_successes: customerStats.previousSuccesses,
-          previous_failures: customerStats.previousFailures,
-          previous_recovery_success: customerStats.previousRecoverySuccess,
-          is_subscription: transaction.paymentMethod === 'subscription_mandate',
+        const orchestration = await RecoveryOrchestrator.orchestrateRecovery({
+          transaction,
+          customer,
+          customerStats,
+          originalEventId: event.eventId,
         });
 
-        // 7. Request Agent Recommendation (GenAI Service or Deterministic Heuristic Fallback)
-        const recommendation = await IngestionService.getAgentRecommendation({
-          transactionId: transaction.id,
-          customerName: customer.name,
-          customerEmail: customer.email,
-          amount: parseFloat(transaction.amount),
-          currency: transaction.currency,
-          paymentMethod: transaction.paymentMethod,
-          failureReason: transaction.failureReason,
-          attemptCount: transaction.attemptCount,
-          mlScore: mlPrediction.probability,
-          mlReasonCodes: mlPrediction.reason_codes,
-        });
+        // Publish Outcome Event to recovery-outcomes topic
+        await publishOutcomeEvent(orchestration.outcomePayload);
 
-        // 8. Evaluate Guardrail Policy Engine
-        const guardrailCheck = GuardrailService.evaluate({
-          transactionId: transaction.id,
-          amount: parseFloat(transaction.amount),
-          currency: transaction.currency,
-          status: transaction.status,
-          failureReason: transaction.failureReason,
-          attemptCount: transaction.attemptCount,
-          recommendedAction: recommendation.action,
-          toolParams: recommendation.toolParams,
-          mlScore: mlPrediction.probability,
-        });
-
-        // 9. Persist Decision Record in PostgreSQL with ML & Guardrail Metadata
-        const decisionStatus = guardrailCheck.decision === 'ALLOW'
-          ? 'executed'
-          : guardrailCheck.decision === 'REQUIRE_APPROVAL'
-          ? 'pending_review'
-          : 'blocked';
-
-        const decision = await createDecision({
-          transactionId: transaction.id,
-          agentAnalystResponse: {
-            confidence: recommendation.confidence,
-            rawReasoning: recommendation.reasoning,
-            suggestedTool: recommendation.action,
-            toolParams: recommendation.toolParams,
-            appliedRules: guardrailCheck.appliedRules,
-            playbookStrategy: recommendation.playbookStrategy || null,
-            mlReasonCodes: mlPrediction.reason_codes,
-            mlModelVersion: mlPrediction.model_version,
-            mlAttributions: mlPrediction.attributions || [],
-          },
-          mlScore: mlPrediction.probability,
-          recommendedAction: recommendation.action,
-          guardrailResult: guardrailCheck.decision,
-          finalAction: guardrailCheck.decision === 'ALLOW' ? recommendation.action : undefined,
-          reasoning: recommendation.reasoning + ` | Guardrail: ${guardrailCheck.reason}`,
-          status: decisionStatus,
-        });
-
-        // 10. Execute Bounded Recovery Tool (if ALLOWed by Guardrails)
-        let executionResult = null;
-        if (guardrailCheck.decision === 'ALLOW') {
-          const actionRecord = await createAction({
-            decisionId: decision.id,
-            toolName: recommendation.action,
-            toolParams: {
-              ...recommendation.toolParams,
-              transactionId: transaction.id,
-              amount: parseFloat(transaction.amount),
-              currency: transaction.currency,
-            },
-            status: 'pending',
-          });
-
-          executionResult = await executeTool(recommendation.action, {
-            ...recommendation.toolParams,
-            transactionId: transaction.id,
-            amount: parseFloat(transaction.amount),
-            currency: transaction.currency,
-          });
-
-          await updateActionResult(
-            actionRecord.id,
-            executionResult.success ? 'success' : 'failed',
-            executionResult.output || {}
-          );
-        }
-
-        // 11. Determine Outcome Status & Publish to recovery-outcomes Topic
-        let outcomeEventType = EVENT_TYPES.RECOVERY_COMPLETED;
-        let outcomeStatus = OUTCOME_TYPES.RECOVERED;
-
-        if (guardrailCheck.decision === 'REQUIRE_APPROVAL') {
-          outcomeEventType = EVENT_TYPES.RECOVERY_SCHEDULED;
-          outcomeStatus = OUTCOME_TYPES.PENDING_REVIEW;
-        } else if (guardrailCheck.decision === 'BLOCK') {
-          outcomeEventType = EVENT_TYPES.RECOVERY_FAILED;
-          outcomeStatus = OUTCOME_TYPES.BLOCKED;
-        } else if (!executionResult?.success) {
-          outcomeEventType = EVENT_TYPES.RECOVERY_FAILED;
-          outcomeStatus = OUTCOME_TYPES.FAILED;
-        } else if (recommendation.action === 'escalate_to_human') {
-          outcomeEventType = EVENT_TYPES.RECOVERY_ESCALATED;
-          outcomeStatus = OUTCOME_TYPES.ESCALATED;
-        } else if (recommendation.action === 'schedule_retry') {
-          outcomeEventType = EVENT_TYPES.RECOVERY_SCHEDULED;
-          outcomeStatus = OUTCOME_TYPES.SCHEDULED;
-        } else {
-          outcomeEventType = EVENT_TYPES.RECOVERY_COMPLETED;
-          outcomeStatus = OUTCOME_TYPES.RECOVERED;
-        }
-
-        const outcomePayload = {
-          eventId: crypto.randomUUID(),
-          eventType: outcomeEventType,
-          occurredAt: new Date().toISOString(),
-          transactionId: transaction.id,
-          caseId: decision.id,
-          customerId: customer.id,
-          outcome: outcomeStatus,
-          toolName: recommendation.action,
-          recoveredAmount: (outcomeStatus === 'recovered' && recommendation.action === 'attempt_recovery')
-            ? parseFloat(transaction.amount)
-            : 0,
-          currency: transaction.currency,
-          details: {
-            originalEventId: event.eventId,
-            guardrailDecision: guardrailCheck.decision,
-            guardrailReason: guardrailCheck.reason,
-            appliedRules: guardrailCheck.appliedRules,
-            mlScore: mlPrediction.probability,
-            mlReasonCodes: mlPrediction.reason_codes,
-            toolExecutionSuccess: executionResult ? executionResult.success : null,
-            toolOutput: executionResult?.output || {},
-          },
-          version: 1,
-        };
-
-        await publishOutcomeEvent(outcomePayload);
-
-        return {
-          decision,
-          guardrailCheck,
-          outcomeStatus,
-          outcomePayload,
-          executionResult,
-        };
+        return orchestration;
       },
       {
         maxRetries: retryConfig.maxRetries !== undefined ? retryConfig.maxRetries : (config.retry?.maxRetries || 3),
@@ -345,14 +193,14 @@ export async function processPaymentMessage({ topic, partition, message, consume
       }
     );
 
-    // 12. Commit Kafka Offset (Safe manual commit after complete processing)
+    // 6. Commit Kafka Offset (Safe manual commit after complete processing)
     if (consumer) {
       await consumer.commitOffsets([
         { topic, partition, offset: (Number(message.offset) + 1).toString() },
       ]);
     }
 
-    // 13. Structured Observability Log
+    // 7. Structured Observability Log
     const durationMs = Date.now() - startTime;
     console.log(
       JSON.stringify({
@@ -365,7 +213,7 @@ export async function processPaymentMessage({ topic, partition, message, consume
         topic,
         partition,
         offset: message.offset,
-        guardrailDecision: pipelineResult.guardrailCheck.decision,
+        guardrailDecision: pipelineResult.policyResult.decision,
         outcome: pipelineResult.outcomeStatus,
         outcomeEventId: pipelineResult.outcomePayload.eventId,
         durationMs,
@@ -377,7 +225,7 @@ export async function processPaymentMessage({ topic, partition, message, consume
       eventId: event.eventId,
       transactionId: transaction.id,
       decisionId: pipelineResult.decision.id,
-      guardrailDecision: pipelineResult.guardrailCheck.decision,
+      guardrailDecision: pipelineResult.policyResult.decision,
       outcome: pipelineResult.outcomeStatus,
       outcomeEventId: pipelineResult.outcomePayload.eventId,
       decision: pipelineResult.decision,
@@ -385,7 +233,7 @@ export async function processPaymentMessage({ topic, partition, message, consume
       durationMs,
     };
   } catch (error) {
-    // 14. Unhandled or exhausted error -> Route to DLQ & Commit Offset
+    // 8. Unhandled or exhausted error -> Route to DLQ & Commit Offset
     const failureType = classifyError(error);
     const retryCount = error.retryCount || 0;
 

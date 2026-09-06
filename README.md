@@ -183,30 +183,58 @@ curl -X POST http://localhost:4000/api/admin/events/<dlqEventId>/replay \
 
 ---
 
-## 🧪 Verification & Test Suite
+## 🛡️ Agentic Safety, Policy Authority & Evaluation (Phase 5)
 
-RecoverIQ features comprehensive unit, integration, resilience, and failure scenario test suites executed using Node.js native test runner (`node --test`).
+RecoverIQ implements a strict **multi-agent separation of concerns** governed by a zero-trust policy architecture:
 
-```bash
-cd backend
-npm test
+$$\text{Kafka Event} \rightarrow \text{PostgreSQL Authoritative State} \rightarrow \text{ML Inference} \rightarrow \text{Agent 1 (Analyst)} \rightarrow \text{Agent 2 (Executor)} \rightarrow \text{Policy Engine (Authority)} \rightarrow \text{Execution Gate} \rightarrow \text{Tool} \rightarrow \text{Outcome}$$
+
+```mermaid
+flowchart LR
+    A1["Agent 1: Recovery Analyst\n(Pure Reasoning / Diagnosis)"] -->|Recommendation| A2["Agent 2: Recovery Executor\n(Action Plan & Parameters)"]
+    A2 -->|Sanitized Proposal| POL{"Formal Policy Engine\n(ALLOW / REQUIRE_APPROVAL / BLOCK)"}
+    POL -->|ALLOW| GATE["Execution Gate\n(Bounded Tools)"]
+    POL -->|REQUIRE_APPROVAL| HITL["Human-in-the-Loop Review\n(Approve / Modify / Reject)"]
+    POL -->|BLOCK| BLK["Terminal Block / Audit"]
+    HITL -->|Fresh Policy Re-Evaluation| POL
 ```
 
-### Test Results (Phase 4 — Step 8)
-- **Total Test Suites**: 26 suites across 8 test modules
-- **Total Tests**: **71 tests**
-- **Passing**: **71 (100%)**
-- **Failing**: **0**
+### Core Safety Invariants
+1. **Models are Untrusted / Advisory Only**: Agent 1 and Agent 2 produce recommendations and parameter proposals only. They have zero direct execution privileges and cannot invoke bounded tools.
+2. **Policy Engine is the Sole Authority**: Deterministic policy rules enforce strict financial ceilings (e.g. > ₹50,000 forces `REQUIRE_APPROVAL`), fraud quarantine (forces `BLOCK`), terminal state protection (forces `BLOCK`), and parameter sanitization.
+3. **Fail-Safe Deterministic Degradation**: If ML or GenAI services encounter network timeouts, 500 errors, or produce schema violations, the system automatically falls back to safe deterministic recovery playbooks without disrupting transaction flow.
+4. **Human Review is NOT a Policy Bypass**: Merchant approvals (`APPROVE`) and parameter edits (`MODIFY`) trigger fresh, independent Policy Engine re-evaluation. Merchant review cannot force execution on terminal transactions or fraud cases.
+5. **Replay Safety & Idempotency**: Dead-letter queue (DLQ) replays generate fresh `eventId`s, preserve `originalEventId` lineage, and re-evaluate the full recovery pipeline against real-time database state.
+6. **Secret & Credential Redaction**: All audit messages, structured logs, and explainability API payloads (`GET /api/admin/recovery-cases/:caseId/explanation`) recursively scrub sensitive keys (`password`, `secret`, `token`, `apiKey`, `jwt`, `cvv`, `pan`, `card_number`).
 
-### Test Coverage Breakdown
-- `kafka-client.test.js` — Broker connectivity, admin topic initialization, producer/consumer singleton lifecycle.
-- `event-contracts.test.js` — Zod schema validation for `payment-events`, `recovery-outcomes`, `dead-letter-events`.
-- `producer.test.js` — Decoupled HTTP webhook ingestion, Redis deduplication, and Kafka message production.
-- `recovery-consumer.test.js` — `recovery-worker-group` stream processing, ML prediction, guardrail checks, tool execution.
-- `outcome-consumer.test.js` — `outcome-worker-group` stream processing, atomic PostgreSQL multi-table reconciliation.
-- `dlq-retry.test.js` — Error classification, transient retries, exponential backoff, DLQ routing, bounded DB rechecks.
-- `event-replay.test.js` — DLQ event discovery, payload contract validation, duplicate prevention, admin auth, CLI/API replay.
-- `failure-scenarios-pipeline.test.js` — End-to-end resilience under poison payloads, concurrent duplicates, downstream outages, and high-value guardrail enforcement.
+---
+
+## 🧪 Verification & Test Suite
+
+RecoverIQ features comprehensive unit, integration, resilience, agentic safety, and adversarial test suites executed across both Node.js and Python test runners:
+
+```bash
+# Backend test suite (15 test modules, 187 tests)
+cd backend && npm test
+
+# Python GenAI test suite (19 agent & schema tests)
+cd genai-service && py -3.11 -m pytest tests/
+```
+
+### Test Results (Phase 5 — Step 7)
+- **Total Backend Tests**: **187 / 187 passed (100%)**
+- **Total Python GenAI Tests**: **19 / 19 passed (100%)**
+- **Total Project Tests**: **206 / 206 passed across entire platform**
+
+### Test Suite Modules
+* `agent-safety-evaluation.test.js` — 12-suite adversarial verification: prompt injection, schema tampering, agent disagreements, policy bypass attempts, human concurrency, and 14-scenario evaluation matrix.
+* `decision-persistence-audit.test.js` — Full decision lineage, agent output immutability, audit logging, and explanation API reconstructability.
+* `human-in-the-loop.test.js` — State machine verification for `pending_review`, merchant `APPROVE`, `MODIFY`, `REJECT`, and Redis distributed locking.
+* `agent-policy-integration.test.js` — Multi-agent pipeline integration (`Agent 1` $\rightarrow$ `Agent 2` $\rightarrow$ `Policy Engine` $\rightarrow$ `Tools`).
+* `recovery-analyst.test.js` & `recovery-executor.test.js` — Schema validation, boundary constraints, and deterministic fallbacks.
+* `policy-engine.test.js` — Deterministic evaluation, precedence levels, and rule catalog.
+* `failure-scenarios-pipeline.test.js` & `event-replay.test.js` — Kafka DLQ, poisoned messages, retry policies, and event replay.
+* `recovery-consumer.test.js`, `outcome-consumer.test.js`, `producer.test.js`, `event-contracts.test.js`, `kafka-client.test.js`, `dlq-retry.test.js`.
 
 ---
 
@@ -215,3 +243,4 @@ npm test
 - **[Architecture & Service Boundaries](docs/ARCHITECTURE.md)** — Detailed component architecture, data ownership, and technology stack.
 - **[Kafka Events & Schemas Specification](docs/EVENTS.md)** — Developer reference for all Kafka event contracts, topics, and payload schemas.
 - **[Operations & Troubleshooting Guide](docs/OPERATIONS.md)** — Runbook for starting local services, running health probes, inspecting DLQ, and replaying events.
+

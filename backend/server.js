@@ -10,6 +10,7 @@ import decisionsRoutes from './api/routes/decisions.routes.js';
 import recoveryRoutes from './api/routes/recovery.routes.js';
 import webhooksRoutes from './api/routes/webhooks.routes.js';
 import adminRoutes from './api/routes/admin-events.routes.js';
+import recoveryCasesRoutes from './api/routes/recovery-cases.routes.js';
 
 import { checkKafkaHealth, initKafkaTopics, disconnectKafka } from './kafka/kafka.client.js';
 import { startRecoveryConsumer, stopRecoveryConsumer } from './kafka/consumers/recovery.consumer.js';
@@ -48,6 +49,7 @@ app.use('/api/transactions', transactionsRoutes);
 app.use('/api/decisions', decisionsRoutes);
 app.use('/api/recover', recoveryRoutes);
 app.use('/api/webhooks', webhooksRoutes);
+app.use('/api/admin/recovery-cases', recoveryCasesRoutes);
 app.use('/api/admin', adminRoutes);
 
 // Error Handling

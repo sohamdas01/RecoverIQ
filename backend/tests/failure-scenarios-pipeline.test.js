@@ -407,7 +407,7 @@ describe('Step 8: Comprehensive Pipeline Failure & Resilience Tests', () => {
           currency: 'INR',
           status: 'failed',
           paymentMethod: 'card',
-          failureReason: 'insufficient_funds',
+          failureReason: 'bank_outage',
           attemptCount: 1,
         })
         .returning();
@@ -422,7 +422,7 @@ describe('Step 8: Comprehensive Pipeline Failure & Resilience Tests', () => {
           amount: 1200,
           currency: 'INR',
           paymentMethod: 'card',
-          failureReason: 'insufficient_funds',
+          failureReason: 'bank_outage',
           attemptCount: 1,
         },
         version: 1,

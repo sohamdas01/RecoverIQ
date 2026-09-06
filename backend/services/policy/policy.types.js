@@ -1,0 +1,44 @@
+/**
+ * RecoverIQ Policy Engine Types & Constants
+ * Phase 5 - Step 1: Formal Policy Engine
+ */
+
+export const POLICY_VERSION = 'v1';
+
+export const POLICY_DECISIONS = {
+  ALLOW: 'ALLOW',
+  REQUIRE_APPROVAL: 'REQUIRE_APPROVAL',
+  BLOCK: 'BLOCK',
+};
+
+export const RULE_IDS = {
+  // BLOCK rules (Highest precedence)
+  TERMINAL_STATE_RECOVERED: 'RULE_TERMINAL_STATE_RECOVERED',
+  TERMINAL_STATE_ABANDONED: 'RULE_TERMINAL_STATE_ABANDONED',
+  FRAUD_BLOCK: 'RULE_FRAUD_BLOCK',
+  UNSUPPORTED_ACTION: 'RULE_UNSUPPORTED_ACTION',
+  INVALID_STATE: 'RULE_INVALID_STATE',
+
+  // REQUIRE_APPROVAL rules (Medium precedence)
+  MAX_AMOUNT_CEILING: 'RULE_MAX_AMOUNT_CEILING',
+  MAX_RETRIES_EXCEEDED: 'RULE_MAX_RETRIES_EXCEEDED',
+  HIGH_VALUE_LOW_CONFIDENCE: 'RULE_HIGH_VALUE_LOW_CONFIDENCE',
+  CARD_EXPIRED_MISMATCH: 'RULE_CARD_EXPIRED_MISMATCH',
+
+  // ALLOW rules (Lowest precedence)
+  POLICY_CLEAR: 'RULE_POLICY_CLEAR',
+};
+
+export const SUPPORTED_ACTIONS = [
+  'attempt_recovery',
+  'send_recovery_message',
+  'schedule_retry',
+  'escalate_to_human',
+  'log_outcome',
+];
+
+export const DECISION_PRECEDENCE = {
+  [POLICY_DECISIONS.BLOCK]: 3,
+  [POLICY_DECISIONS.REQUIRE_APPROVAL]: 2,
+  [POLICY_DECISIONS.ALLOW]: 1,
+};

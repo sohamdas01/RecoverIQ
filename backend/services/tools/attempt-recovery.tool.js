@@ -25,11 +25,8 @@ export async function executeAttemptRecovery(params) {
       isSuccessful = params.forceMockSuccess;
       gatewayMessage = isSuccessful ? 'Mock payment retry succeeded' : 'Mock payment retry failed at bank gateway';
     } else if (isMock) {
-      // 70% chance of recovery on first automated retry for transient issues
-      isSuccessful = Math.random() > 0.3;
-      gatewayMessage = isSuccessful
-        ? 'Simulated Razorpay retry: Payment captured successfully'
-        : 'Simulated Razorpay retry: Bank declined transaction (insufficient balance)';
+      isSuccessful = true;
+      gatewayMessage = 'Simulated Razorpay retry: Payment captured successfully';
     } else {
       gatewayMessage = 'Razorpay test API retry dispatched';
       isSuccessful = true;
