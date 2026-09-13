@@ -11,40 +11,41 @@ RecoverIQ decouples high-throughput payment webhook ingestion from downstream re
 ```mermaid
 flowchart TD
     subgraph Ingestion["1. Ingestion Layer"]
-        WH["Payment Webhook / Simulate"] --> EP["Event Producer Service"]
-        EP -->|1. Check Idempotency| REDIS[("Redis Cache")]
-        EP -->|2. Persist Initial Txn| DB[("PostgreSQL\n(Source of Truth)")]
-        EP -->|3. Publish Minimal Event| TOPIC_PAY["Kafka Topic:\npayment-events"]
+        WH["Payment Webhook / Simulate\n(Frontend / Razorpay)"] --> BACKEND["Backend Ingestion Service\n(Node.js / Express)"]
+        BACKEND -->|1. Check Idempotency| REDIS[("Redis Cache")]
+        BACKEND -->|2. Persist Initial Txn| DB[("PostgreSQL\n(Source of Truth)")]
+        BACKEND -->|3. Publish Minimal Event| TOPIC_PAY["Kafka Topic:\npayment-events"]
     end
 
-    subgraph Worker["2. Recovery Worker Layer"]
+    subgraph Pipeline["2. Recovery Worker & Multi-Agent Pipeline"]
         TOPIC_PAY --> RW["Recovery Consumer\n(recovery-worker-group)"]
-        RW -->|Fetch Authoritative State| DB
-        RW -->|Feature Extraction| ML["ML Service\n(LightGBM + SHAP)"]
-        RW -->|Agent Recommendation| AGENT["Decision Agent / Rules"]
-        RW -->|Policy Engine| GR["Guardrail Service"]
+        RW -->|Authoritative State| DB
+        RW -->|1. Statistical Scoring| ML["ML Service\n(LightGBM + TreeSHAP)"]
+        RW -->|2. Diagnostic Reasoning| A1["Agent 1: Recovery Analyst\n(Root Cause & Strategy)"]
+        RW -->|3. Action Plan & Params| A2["Agent 2: Recovery Executor\n(Concrete Tool Proposal)"]
+        RW -->|4. Deterministic Evaluation| PE["Policy Engine\n(Sole Execution Authority)"]
     end
 
-    subgraph Decision["3. Decision & Execution"]
-        GR -->|ALLOW| TOOL["Execute Recovery Tool\n(attempt_retry / send_link)"]
-        GR -->|REQUIRE_APPROVAL| REV["Queue for Merchant Review\n(status: pending_review)"]
-        GR -->|BLOCK| BLK["Block Action\n(status: blocked)"]
-        TOOL --> TOPIC_OUT["Kafka Topic:\nrecovery-outcomes"]
-        REV --> TOPIC_OUT
+    subgraph Decision["3. Decision, Execution Gate & HITL"]
+        PE -->|ALLOW| GATE["Execution Gate\n(attempt_retry / send_link)"]
+        PE -->|REQUIRE_APPROVAL| HITL["Human-in-the-Loop Review Queue\n(status: pending_review)"]
+        PE -->|BLOCK| BLK["Terminal Block / Audit\n(status: blocked)"]
+        GATE --> TOPIC_OUT["Kafka Topic:\nrecovery-outcomes"]
+        HITL --> TOPIC_OUT
         BLK --> TOPIC_OUT
     end
 
     subgraph Outcome["4. Reconciliation Layer"]
         TOPIC_OUT --> OW["Outcome Consumer\n(outcome-worker-group)"]
         OW -->|Atomic Transaction| DB
-        DB --> FE["Merchant Dashboard & Analytics"]
+        DB --> FE["Merchant Dashboard & Analytics\n(Next.js App)"]
     end
 
     subgraph DLQ_Flow["5. Failure & Replay Lifecycle"]
         RW -.->|Poison / Exhausted| TOPIC_DLQ["Kafka Topic:\ndead-letter-events"]
         OW -.->|Unprocessable| TOPIC_DLQ
         TOPIC_DLQ --> REPLAY["Replay Engine\n(CLI / Admin API)"]
-        REPLAY -->|New eventId + preserved originalEventId| TOPIC_PAY
+        REPLAY -->|New eventId + Lineage| TOPIC_PAY
     end
 ```
 

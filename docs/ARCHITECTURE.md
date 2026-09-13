@@ -1,6 +1,6 @@
 # RecoverIQ — Architecture & System Design Document
 
-This document defines the system architecture, component boundaries, data ownership model, failure handling strategies, and security guarantees for RecoverIQ as implemented in **Phase 4: Event-Driven Architecture with Apache Kafka**.
+This document defines the system architecture, component boundaries, data ownership model, failure handling strategies, and security guarantees for RecoverIQ as implemented across the platform.
 
 ---
 
@@ -17,8 +17,8 @@ graph TB
     subgraph BackendGateway["Backend & API Layer"]
         EXPRESS["RecoverIQ Backend API\n(Node.js / Express / JavaScript)"]
         AUTH["Auth Service\n(JWT / Bearer Tokens)"]
-        GUARDRAIL["Policy & Guardrail Engine\n(ALLOW / APPROVE / BLOCK)"]
-        MCP_TOOLS["Recovery Action Tools\n(retry / message / escalate)"]
+        POLICY["Policy Engine\n(Sole Authority: ALLOW / REQUIRE_APPROVAL / BLOCK)"]
+        GATE["Execution Gate\n(attempt_retry / send_link / escalate)"]
     end
 
     subgraph EventBackbone["Event Streaming Layer"]
@@ -32,12 +32,18 @@ graph TB
 
     subgraph DataLayer["Storage & Cache Layer"]
         POSTGRES[("PostgreSQL 16\n(Source of Truth / Drizzle ORM)")]
-        REDIS[("Redis 7\n(Idempotency & Locks)")]
+        REDIS[("Redis 7\n(Idempotency, Locks & HITL)")]
     end
 
-    subgraph ML_Microservice["ML & AI Diagnostic Layer"]
+    subgraph ML_Microservice["ML Diagnostic Layer"]
         FASTAPI["ML Inference Service\n(Python / FastAPI / LightGBM)"]
         SHAP["Explainability Engine\n(TreeSHAP Reason Codes)"]
+    end
+
+    subgraph GenAI_Microservice["GenAI & Multi-Agent Layer"]
+        AGENT1["Agent 1: Recovery Analyst\n(FastAPI :8001 / Diagnosis)"]
+        AGENT2["Agent 2: Recovery Executor\n(FastAPI :8001 / Action Planner)"]
+        QDRANT[("Qdrant Vector DB\n(Playbook RAG Retrieval)")]
     end
 
     MERCHANT -->|REST API / JWT| EXPRESS
@@ -56,24 +62,29 @@ graph TB
     TOPIC_OUT --> WORKER_OUT
 
     WORKER_REC -->|State Lookup| POSTGRES
-    WORKER_REC -->|REST /predict| FASTAPI
+    WORKER_REC -->|1. REST /predict| FASTAPI
     FASTAPI --> SHAP
-    WORKER_REC --> GUARDRAIL
-    WORKER_REC --> MCP_TOOLS
-    WORKER_REC -->|Produce Outcome| TOPIC_OUT
+    WORKER_REC -->|2. REST /internal/recovery/analyze| AGENT1
+    AGENT1 --> QDRANT
+    WORKER_REC -->|3. REST /internal/recovery/plan| AGENT2
+    WORKER_REC -->|4. Deterministic Evaluation| POLICY
+    POLICY -->|ALLOW| GATE
+    POLICY -->|REQUIRE_APPROVAL| REDIS
+    GATE -->|Produce Outcome| TOPIC_OUT
     WORKER_REC -.->|Poison / Fail| TOPIC_DLQ
 
     WORKER_OUT -->|Atomic Transaction| POSTGRES
 ```
 
 ### Technology Matrix
-- **Backend API & Workers**: Node.js v22+, Express 4.x (ES Modules), KafkaJS 2.x
+- **Backend API & Workers**: Node.js v22+, Express 4.x (ES Modules), KafkaJS 2.x, OpenTelemetry, Prometheus
 - **Event Streaming**: Redpanda (Kafka 3.x compatible)
 - **Database & ORM**: PostgreSQL 16, Drizzle ORM 0.38+
 - **Cache & Distributed Locks**: Redis 7, `ioredis`
-- **Frontend Dashboard & Recovery UI**: Next.js 14, React 18, Tailwind CSS
-- **ML Diagnostic Microservice**: Python 3.10+, FastAPI, LightGBM, TreeSHAP
-- **Testing**: Node.js native test runner (`node --test`), `node:assert/strict`
+- **Frontend Dashboard & Recovery UI**: Next.js 16 (Turbopack), React 18, Tailwind CSS
+- **ML Diagnostic Microservice**: Python 3.11+, FastAPI, LightGBM, TreeSHAP
+- **GenAI Multi-Agent Microservice**: Python 3.11+, FastAPI, Pydantic v2, Qdrant RAG client
+- **Testing**: Node.js native test runner (`node --test`), `pytest`
 
 ---
 
@@ -85,9 +96,11 @@ graph TB
 | **Kafka Broker** | Durable, ordered event backbone and transport stream. | Stores serialized event streams with retention. Does **NOT** own relational business state. |
 | **Redis Cache** | Short-term distributed locks, rate-limits, and idempotency keys. | Owns `idempotency:*`, `lock:*`, `rate_limit:*`, `dlq:event:*`, and `replay:completed:*` keys with TTLs. |
 | **Backend Producer** | Validates incoming webhooks, records initial transaction in DB, publishes minimal event to Kafka, and immediately responds HTTP 200. | Does not execute recovery actions directly. |
-| **Recovery Consumer (`recovery-worker-group`)** | Consumes from `payment-events`, loads DB context, runs ML prediction, evaluates guardrails, executes recovery tools, and produces to `recovery-outcomes`. | Reads DB; writes decision records and tool results. |
+| **Recovery Consumer (`recovery-worker-group`)** | Consumes from `payment-events`, loads DB context, orchestrates ML scoring, Agent 1 diagnosis, Agent 2 planning, Policy Engine evaluation, and Execution Gate. | Reads DB; coordinates pipeline and produces to `recovery-outcomes`. |
 | **Outcome Consumer (`outcome-worker-group`)** | Consumes from `recovery-outcomes` and executes atomic PostgreSQL reconciliation. | Atomic multi-table writer (`transactions`, `decisions`, `actions`, `messages`). |
-| **ML Microservice** | Computes statistical recovery probability and TreeSHAP attribution codes. | Pure inference service; does not write to database. |
+| **ML Microservice** | Computes statistical recovery propensity and TreeSHAP attribution codes. | Pure inference service; zero database writes. |
+| **GenAI Microservice** | Hosts Agent 1 (Recovery Analyst) and Agent 2 (Recovery Executor) with Qdrant RAG playbook retrieval. Advisory proposals only. | Pure reasoning microservice; zero direct tool execution authority. |
+| **Policy Engine** | Sole backend deterministic authority enforcing financial limits, fraud quarantine, and rules (`ALLOW`, `REQUIRE_APPROVAL`, `BLOCK`). | Owns policy rule catalog and decision evaluations. |
 
 ---
 
@@ -102,9 +115,11 @@ sequenceDiagram
     participant Postgres as PostgreSQL DB
     participant Kafka as Kafka (payment-events)
     participant RecWorker as Recovery Consumer
-    participant ML as ML Service
-    participant Guardrail as Guardrail Policy
-    participant Tools as Recovery Tools
+    participant ML as ML Service (LightGBM)
+    participant A1 as Agent 1 (Analyst)
+    participant A2 as Agent 2 (Executor)
+    participant Policy as Policy Engine
+    participant Gate as Execution Gate
     participant OutKafka as Kafka (recovery-outcomes)
     participant OutWorker as Outcome Consumer
 
@@ -117,17 +132,21 @@ sequenceDiagram
     Kafka->>RecWorker: Consume Message from payment-events
     RecWorker->>Redis: Check eventId Idempotency
     RecWorker->>Postgres: Fetch Authoritative Transaction & Customer Stats
-    RecWorker->>ML: POST /predict/recovery-probability
-    ML-->>RecWorker: Score & SHAP Reason Codes
-    RecWorker->>Guardrail: Evaluate Policy Engine
+    RecWorker->>ML: POST /predict (Recovery Propensity & SHAP Codes)
+    ML-->>RecWorker: Score & Reason Codes
+    RecWorker->>A1: POST /internal/recovery/analyze (Diagnosis Context)
+    A1-->>RecWorker: Recommendation & Grounding Rationale
+    RecWorker->>A2: POST /internal/recovery/plan (Action Proposal Context)
+    A2-->>RecWorker: Concrete Action Plan & Parameter Proposal
+    RecWorker->>Policy: Evaluate Policy Engine Rules
     
-    alt Guardrail == ALLOW
-        RecWorker->>Tools: Execute Bounded Tool (attempt_recovery / send_link)
-        Tools-->>RecWorker: Execution Result
-        RecWorker->>OutKafka: Publish Outcome (outcome: recovered / failed)
-    else Guardrail == REQUIRE_APPROVAL
+    alt Policy == ALLOW
+        RecWorker->>Gate: Execute Bounded Tool (attempt_recovery / send_link)
+        Gate-->>RecWorker: Execution Result
+        RecWorker->>OutKafka: Publish Outcome (outcome: recovered / scheduled)
+    else Policy == REQUIRE_APPROVAL
         RecWorker->>OutKafka: Publish Outcome (outcome: pending_review)
-    else Guardrail == BLOCK
+    else Policy == BLOCK
         RecWorker->>OutKafka: Publish Outcome (outcome: blocked)
     end
     
