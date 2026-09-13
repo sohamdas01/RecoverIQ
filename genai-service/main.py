@@ -4,10 +4,14 @@ Phase 5 - Step 3: Multi-Agent Architecture (Agent 1: Analyst & Agent 2: Executor
 """
 
 import os
+import hmac
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Header, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, Any
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from agents.schemas import (
     RecoveryAnalystInput,
@@ -33,9 +37,95 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Internal Service Boundary Protection & Production Validation
+ENVIRONMENT = os.getenv("ENVIRONMENT") or os.getenv("ENV") or os.getenv("NODE_ENV") or "development"
+IS_PRODUCTION = ENVIRONMENT.lower() == "production"
+
+INSECURE_DEV_SECRETS = {
+    "recoveriq-internal-service-token-dev-secret",
+    "your-shared-internal-service-token-secret",
+    "your-genai-service-internal-token-secret",
+}
+
+def get_genai_internal_token() -> str:
+    token = os.getenv("GENAI_INTERNAL_TOKEN") or os.getenv("INTERNAL_SERVICE_TOKEN")
+    if not token or token.strip() == "":
+        if IS_PRODUCTION:
+            raise RuntimeError(
+                "[Config Error] GENAI_INTERNAL_TOKEN or INTERNAL_SERVICE_TOKEN must be explicitly set in production mode."
+            )
+        return "recoveriq-internal-service-token-dev-secret"
+
+    if IS_PRODUCTION and token.strip() in INSECURE_DEV_SECRETS:
+        raise RuntimeError(
+            f"[Config Error] Insecure default internal token detected in production: '{token}'"
+        )
+    return token.strip()
+
+GENAI_INTERNAL_TOKEN = get_genai_internal_token()
+
+async def verify_internal_token(
+    x_internal_service_token: Optional[str] = Header(None, alias="x-internal-service-token"),
+    authorization: Optional[str] = Header(None),
+):
+    """
+    Validates that incoming internal service requests possess the authoritative internal token.
+    Returns 401 Unauthorized if token is missing.
+    Returns 403 Forbidden if token is invalid.
+    """
+    token = x_internal_service_token
+    if not token and authorization:
+        if authorization.startswith("Bearer "):
+            token = authorization[7:].strip()
+        else:
+            token = authorization.strip()
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing internal service token (x-internal-service-token header required).",
+        )
+
+    current_token = get_genai_internal_token()
+    if not hmac.compare_digest(token, current_token):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid internal service token.",
+        )
+    return token
+
 # Initialize Autonomous Agents
 recovery_analyst = RecoveryAnalystAgent()
 recovery_executor = RecoveryExecutorAgent()
+
+
+@app.get("/health/live")
+def liveness_probe():
+    """Liveness probe: returns 200 if the process is up."""
+    return {
+        "status": "alive",
+        "service": "recoveriq-genai-service",
+    }
+
+
+@app.get("/health/ready")
+def readiness_probe():
+    """Readiness probe: returns 200 if agents are loaded and ready."""
+    is_ready = recovery_analyst is not None and recovery_executor is not None
+    if not is_ready:
+        raise HTTPException(
+            status_code=503,
+            detail={"status": "not_ready", "service": "recoveriq-genai-service", "reason": "Agents not initialized"}
+        )
+    return {
+        "status": "ready",
+        "service": "recoveriq-genai-service",
+        "version": "1.2.0",
+        "agents": {
+            "recovery_analyst": "active",
+            "recovery_executor": "active",
+        },
+    }
 
 
 @app.get("/health")
@@ -51,7 +141,7 @@ def health_check():
     }
 
 
-@app.post("/internal/recovery/analyze", response_model=RecoveryAnalystOutput)
+@app.post("/internal/recovery/analyze", response_model=RecoveryAnalystOutput, dependencies=[Depends(verify_internal_token)])
 async def analyze_recovery_internal(payload: RecoveryAnalystInput):
     """
     Internal API for Agent 1 (Recovery Analyst).
@@ -64,7 +154,7 @@ async def analyze_recovery_internal(payload: RecoveryAnalystInput):
         raise HTTPException(status_code=500, detail=f"Agent 1 analysis error: {str(e)}")
 
 
-@app.post("/internal/recovery/plan", response_model=RecoveryExecutorOutput)
+@app.post("/internal/recovery/plan", response_model=RecoveryExecutorOutput, dependencies=[Depends(verify_internal_token)])
 async def plan_recovery_internal(payload: RecoveryExecutorInput):
     """
     Internal API for Agent 2 (Recovery Executor / Action Planner).
@@ -78,7 +168,7 @@ async def plan_recovery_internal(payload: RecoveryExecutorInput):
         raise HTTPException(status_code=500, detail=f"Agent 2 planning error: {str(e)}")
 
 
-@app.post("/analyze")
+@app.post("/analyze", dependencies=[Depends(verify_internal_token)])
 async def analyze_legacy(raw_payload: Dict[str, Any]):
     """
     Backwards-compatible endpoint executing complete Agent 1 + Agent 2 pipeline.

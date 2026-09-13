@@ -1,5 +1,11 @@
 import axios from 'axios';
 import { config } from '../config/index.js';
+import { logger } from '../logger/index.js';
+import { metrics, classifyError } from '../metrics/index.js';
+import { withSpan, injectTraceContext } from '../observability/tracing.service.js';
+import { SpanKind } from '@opentelemetry/api';
+
+const mlLogger = logger.withComponent('ml_client');
 
 /**
  * Request recovery probability and SHAP reason codes from ML Service
@@ -9,18 +15,59 @@ import { config } from '../config/index.js';
  * @returns {Promise<Object>} ML prediction result with probability and reason_codes
  */
 export async function getMLPrediction(payload) {
+  const startTime = Date.now();
   try {
-    const response = await axios.post(
-      `${config.mlServiceUrl}/predict`,
-      payload,
-      { timeout: 3000 }
-    );
-    if (response.data && typeof response.data.probability === 'number') {
-      return response.data;
-    }
+    const result = await withSpan('ml.inference', {
+      kind: SpanKind.CLIENT,
+      attributes: {
+        'http.method': 'POST',
+        'http.route': '/predict',
+        'service.target': 'ml-service',
+        'peer.service': 'recoveriq-ml-service',
+        'component': 'ml_client',
+      },
+    }, async (span) => {
+      const headers = {
+        'x-internal-service-token': config.mlInternalToken,
+      };
+      injectTraceContext(headers);
+
+      const response = await axios.post(
+        `${config.mlServiceUrl}/predict`,
+        payload,
+        { timeout: 3000, headers }
+      );
+      const durationMs = Date.now() - startTime;
+      if (response.data && typeof response.data.probability === 'number') {
+        span.setAttribute('ml.model_version', response.data.model_version || 'v1.0.0');
+        span.setAttribute('ml.is_fallback', false);
+        metrics.recordMLPrediction(false, durationMs / 1000);
+        mlLogger.info('ml_prediction_completed', {
+          durationMs,
+          probability: response.data.probability,
+          modelVersion: response.data.model_version || 'v1.0.0',
+          reasonCodes: response.data.reason_codes || [],
+          isFallback: false,
+        });
+        return response.data;
+      }
+      return null;
+    });
+
+    if (result) return result;
   } catch (err) {
-    console.warn(`[ML Client] ML service unreachable (${err.message}). Using built-in baseline probability heuristics.`);
+    const durationMs = Date.now() - startTime;
+    const errorType = classifyError(err);
+    metrics.recordMLPrediction(true, durationMs / 1000);
+    metrics.recordMLFailure(errorType);
+    mlLogger.warn('ml_prediction_fallback', {
+      durationMs,
+      error: err.message,
+      errorType,
+      isFallback: true,
+    });
   }
+
 
   // Heuristic ML fallback in case ML service is offline
   const reason = payload.failure_reason;

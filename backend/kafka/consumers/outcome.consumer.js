@@ -16,9 +16,26 @@ import {
   executeWithRetry,
   routeToDlq,
 } from '../dlq.service.js';
+import {
+  logger,
+  runWithCorrelationContext,
+  updateCorrelationContext,
+  sanitizeCorrelationId,
+} from '../../services/logger/index.js';
+import { metrics } from '../../services/metrics/index.js';
+import { withSpan, extractTraceContext, kafkaHeaderGetter } from '../../services/observability/tracing.service.js';
+import { SpanKind } from '@opentelemetry/api';
+
+const consumerLogger = logger.withComponent('outcome_consumer');
 
 let outcomeConsumerInstance = null;
 let isRunning = false;
+
+function getHeaderStr(headers, key) {
+  if (!headers || headers[key] === undefined || headers[key] === null) return undefined;
+  const val = headers[key];
+  return Buffer.isBuffer(val) ? val.toString('utf-8') : String(val);
+}
 
 /**
  * Process and atomically reconcile a recovery outcome event with PostgreSQL
@@ -26,16 +43,55 @@ let isRunning = false;
 export async function processOutcomeMessage({ topic, partition, message, consumer, retryConfig = {} }) {
   const startTime = Date.now();
   let rawPayload = null;
-  let eventId = message.headers?.eventId ? (Buffer.isBuffer(message.headers.eventId) ? message.headers.eventId.toString('utf-8') : String(message.headers.eventId)) : undefined;
-  let transactionId = message.headers?.transactionId ? (Buffer.isBuffer(message.headers.transactionId) ? message.headers.transactionId.toString('utf-8') : String(message.headers.transactionId)) : undefined;
-  let caseId = message.headers?.caseId ? (Buffer.isBuffer(message.headers.caseId) ? message.headers.caseId.toString('utf-8') : String(message.headers.caseId)) : undefined;
+  const headerRequestId = sanitizeCorrelationId(getHeaderStr(message.headers, 'requestId') || getHeaderStr(message.headers, 'x-request-id'));
+  const headerCorrelationId = sanitizeCorrelationId(getHeaderStr(message.headers, 'correlationId') || getHeaderStr(message.headers, 'x-correlation-id')) || headerRequestId;
+  const headerOriginalEventId = getHeaderStr(message.headers, 'originalEventId');
+  const headerReplayEventId = getHeaderStr(message.headers, 'replayEventId');
+  let eventId = getHeaderStr(message.headers, 'eventId');
+  let transactionId = getHeaderStr(message.headers, 'transactionId');
+  let caseId = getHeaderStr(message.headers, 'caseId');
 
-  try {
-    // 1. Deserialize message (Poison check)
-    const deserialized = deserializeEvent(message.value);
-    if (!deserialized.success) {
-      console.error(`[Outcome Consumer] Deserialization error at ${topic}[${partition}] offset ${message.offset}:`, deserialized.error);
-      const dlqResult = await routeToDlq({
+  const initialContext = {
+    requestId: headerRequestId,
+    correlationId: headerCorrelationId,
+    originalEventId: headerOriginalEventId,
+    replayEventId: headerReplayEventId,
+    eventId,
+    transactionId,
+    caseId,
+  };
+
+  metrics.recordKafkaConsumed(topic, 'outcome-worker-group');
+
+  // Extract W3C trace context from Kafka headers
+  const parentTraceContext = extractTraceContext(message.headers, kafkaHeaderGetter);
+
+  return withSpan(`kafka.consume ${topic}`, {
+    kind: SpanKind.CONSUMER,
+    parentContext: parentTraceContext,
+    attributes: {
+      'messaging.system': 'kafka',
+      'messaging.source': topic,
+      'messaging.kafka.partition': partition,
+      'messaging.kafka.consumer_group': 'outcome-worker-group',
+      'component': 'outcome_consumer',
+    },
+  }, async (consumerSpan) => {
+    return runWithCorrelationContext(initialContext, async () => {
+
+    try {
+      // 1. Deserialize message (Poison check)
+      const deserialized = deserializeEvent(message.value);
+      if (!deserialized.success) {
+        metrics.recordKafkaProcessed(topic, 'failed', (Date.now() - startTime) / 1000);
+        metrics.recordDlqRouted(topic, 'poison_message');
+        consumerLogger.error('Deserialization error on outcome event', {
+          topic,
+          partition,
+          offset: message.offset,
+          error: deserialized.error,
+        });
+        const dlqResult = await routeToDlq({
         topic,
         partition,
         offset: message.offset,
@@ -58,10 +114,27 @@ export async function processOutcomeMessage({ topic, partition, message, consume
     transactionId = rawPayload?.transactionId || transactionId;
     caseId = rawPayload?.caseId || caseId;
 
+    updateCorrelationContext({
+      eventId,
+      transactionId,
+      caseId,
+      customerId: rawPayload?.customerId,
+      originalEventId: rawPayload?.originalEventId || headerOriginalEventId,
+      replayEventId: rawPayload?.replayEventId || headerReplayEventId,
+    });
+
     // 2. Validate against Zod OutcomeEventSchema contract
     const validation = validateOutcomeEvent(rawPayload);
     if (!validation.success) {
-      console.error(`[Outcome Consumer] Outcome event contract validation rejected at ${topic}[${partition}] offset ${message.offset}:`, validation.errorMessage);
+      metrics.recordKafkaProcessed(topic, 'failed', (Date.now() - startTime) / 1000);
+      metrics.recordDlqRouted(topic, 'schema_validation_error');
+      consumerLogger.error('Outcome event contract validation rejected', {
+        topic,
+        partition,
+        offset: message.offset,
+        error: validation.errorMessage,
+        validationErrors: validation.errors,
+      });
       const dlqResult = await routeToDlq({
         topic,
         partition,
@@ -94,7 +167,11 @@ export async function processOutcomeMessage({ topic, partition, message, consume
     const idempotencyKey = `idempotency:outcome_processed:${event.eventId}`;
     const isFirstProcessing = await checkIdempotency(idempotencyKey, 86400);
     if (!isFirstProcessing) {
-      console.warn(`[Outcome Consumer] Duplicate outcome detected for eventId: ${event.eventId}. Skipping redundant DB reconciliation.`);
+      consumerLogger.warn('Duplicate outcome detected, skipping redundant DB reconciliation', {
+        eventId: event.eventId,
+        caseId: event.caseId,
+        transactionId: event.transactionId,
+      });
       if (consumer) {
         await consumer.commitOffsets([{ topic, partition, offset: (Number(message.offset) + 1).toString() }]);
       }
@@ -152,7 +229,12 @@ export async function processOutcomeMessage({ topic, partition, message, consume
       currentAction = state.act;
     } catch (err) {
       if (err.isEntityMissing) {
-        console.error(`[Outcome Consumer] Entity not found after ${entityRecheckRetries} bounded checks:`, err.message);
+        metrics.recordKafkaProcessed(topic, 'failed', (Date.now() - startTime) / 1000);
+        metrics.recordDlqRouted(topic, 'database_error');
+        consumerLogger.error(`Entity not found after ${entityRecheckRetries} bounded checks`, {
+          error: err.message,
+          retryCount: entityRecheckRetries,
+        });
         const dlqResult = await routeToDlq({
           topic,
           partition,
@@ -239,26 +321,33 @@ export async function processOutcomeMessage({ topic, partition, message, consume
       actionStatus,
     };
 
-    // 6. Atomic Database Transaction with Transient Retry Wrapper
-    await executeWithRetry(
-      async (attempt) => {
-        await db.transaction(async (tx) => {
-          // 6a. Update Transaction Record
-          await tx
-            .update(transactions)
-            .set({
-              status: newTransactionStatus,
-              metadata: {
-                ...(currentTx.metadata || {}),
-                ...(event.details || {}),
-                recoveredAmount: isRecovered ? (event.recoveredAmount || parseFloat(currentTx.amount)) : (currentTx.metadata?.recoveredAmount || 0),
-                lastOutcomeEventId: event.eventId,
-                lastOutcomeType: event.eventType,
-                lastReconciledAt: new Date().toISOString(),
-              },
-              updatedAt: new Date(),
-            })
-            .where(eq(transactions.id, event.transactionId));
+    // 6. Atomic Database Transaction with Transient Retry Wrapper & Tracing
+    await withSpan('reconciliation.db', {
+      attributes: {
+        'component': 'db_reconciliation',
+        'db.system': 'postgresql',
+      },
+    }, async () => {
+      await executeWithRetry(
+        async (attempt) => {
+          await db.transaction(async (tx) => {
+            // 6a. Update Transaction Record
+            await tx
+              .update(transactions)
+              .set({
+                status: newTransactionStatus,
+                metadata: {
+                  ...(currentTx.metadata || {}),
+                  ...(event.details || {}),
+                  recoveredAmount: isRecovered ? (event.recoveredAmount || parseFloat(currentTx.amount)) : (currentTx.metadata?.recoveredAmount || 0),
+                  lastOutcomeEventId: event.eventId,
+                  lastOutcomeType: event.eventType,
+                  lastReconciledAt: new Date().toISOString(),
+                },
+                updatedAt: new Date(),
+              })
+              .where(eq(transactions.id, event.transactionId));
+
 
           // 6b. Update Decision Record
           await tx
@@ -328,6 +417,7 @@ export async function processOutcomeMessage({ topic, partition, message, consume
         jitter: retryConfig.jitter !== false,
       }
     );
+    });
 
     // 7. Safe Manual Offset Commit (Only committed after successful atomic DB transaction)
     if (consumer) {
@@ -338,24 +428,22 @@ export async function processOutcomeMessage({ topic, partition, message, consume
 
     // 8. Structured Observability Log
     const durationMs = Date.now() - startTime;
-    console.log(
-      JSON.stringify({
-        level: 'INFO',
-        event: 'OUTCOME_RECONCILED',
-        eventId: event.eventId,
-        caseId: event.caseId,
-        transactionId: event.transactionId,
-        topic,
-        partition,
-        offset: message.offset,
-        previousState,
-        newState,
-        outcome: event.outcome,
-        recoveredAmount: event.recoveredAmount || 0,
-        processingResult: 'reconciled_atomic',
-        durationMs,
-      })
-    );
+    metrics.recordKafkaProcessed(topic, 'success', durationMs / 1000);
+    consumerLogger.info('OUTCOME_RECONCILED', {
+      event: 'OUTCOME_RECONCILED',
+      eventId: event.eventId,
+      caseId: event.caseId,
+      transactionId: event.transactionId,
+      topic,
+      partition,
+      offset: message.offset,
+      previousState,
+      newState,
+      outcome: event.outcome,
+      recoveredAmount: event.recoveredAmount || 0,
+      processingResult: 'reconciled_atomic',
+      durationMs,
+    });
 
     return {
       success: true,
@@ -370,8 +458,17 @@ export async function processOutcomeMessage({ topic, partition, message, consume
     // 9. Unhandled or exhausted error -> Route to DLQ & Commit Offset
     const failureType = classifyError(error);
     const retryCount = error.retryCount || 0;
+    metrics.recordKafkaProcessed(topic, 'failed', (Date.now() - startTime) / 1000);
+    metrics.recordDlqRouted(topic, failureType);
 
-    console.error(`[Outcome Consumer Error] Routing event to DLQ due to ${failureType}:`, error.message);
+    consumerLogger.error(`Routing event to DLQ due to ${failureType}`, {
+      error: error.message,
+      failureType,
+      retryCount,
+      topic,
+      partition,
+      offset: message.offset,
+    });
 
     const dlqResult = await routeToDlq({
       topic,
@@ -401,6 +498,8 @@ export async function processOutcomeMessage({ topic, partition, message, consume
       retryCount,
     };
   }
+  });
+  });
 }
 
 /**

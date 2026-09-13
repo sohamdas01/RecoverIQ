@@ -11,6 +11,11 @@ import {
 } from './schemas/events.schema.js';
 import { publishPaymentEvent, publishOutcomeEvent } from './producer.js';
 import { createConsumer } from './kafka.client.js';
+import { logger } from '../services/logger/index.js';
+import { metrics } from '../services/metrics/index.js';
+import { withSpan } from '../services/observability/index.js';
+
+const replayLogger = logger.withComponent('replay_service');
 
 // In-memory fallback cache for test environments without Redis
 const memoryDlqStore = new Map();
@@ -110,13 +115,20 @@ export async function replayDlqEvent(dlqEventId, options = {}) {
   const replayedBy = options.replayedBy || 'admin';
   const dryRun = options.dryRun === true;
 
-  // 1. Verify DLQ record exists
-  const dlqRecord = await findDlqEvent(dlqEventId);
-  if (!dlqRecord) {
-    const notFoundError = new Error(`DLQ event not found: ${dlqEventId}`);
-    notFoundError.statusCode = 404;
-    throw notFoundError;
-  }
+  return withSpan('dlq.replay', {
+    attributes: {
+      'dlq.event_id': dlqEventId,
+      'replay.by': replayedBy,
+      'replay.dry_run': dryRun,
+    },
+  }, async (replaySpan) => {
+    // 1. Verify DLQ record exists
+    const dlqRecord = await findDlqEvent(dlqEventId);
+    if (!dlqRecord) {
+      const notFoundError = new Error(`DLQ event not found: ${dlqEventId}`);
+      notFoundError.statusCode = 404;
+      throw notFoundError;
+    }
 
   // 2. Prevent duplicate replay (Idempotency)
   let alreadyReplayed = false;
@@ -285,19 +297,21 @@ export async function replayDlqEvent(dlqEventId, options = {}) {
   }
 
   // 10. Structured Observability Log
-  console.log(
-    JSON.stringify({
-      level: 'INFO',
-      event: 'DLQ_EVENT_REPLAYED',
-      dlqEventId,
-      originalEventId,
-      replayEventId: newReplayEventId,
-      targetTopic: originalTopic,
-      transactionId: replayedPayload.transactionId,
-      replayedBy,
-      replayedAt,
-    })
-  );
+  metrics.recordDlqReplay(originalTopic, 'success');
+  replayLogger.info('DLQ_EVENT_REPLAYED', {
+    event: 'DLQ_EVENT_REPLAYED',
+    dlqEventId,
+    originalEventId,
+    replayEventId: newReplayEventId,
+    targetTopic: originalTopic,
+    transactionId: replayedPayload.transactionId,
+    replayedBy,
+    replayedAt,
+  });
+
+  replaySpan.setAttribute('original.event_id', originalEventId);
+  replaySpan.setAttribute('replay.event_id', newReplayEventId);
+  replaySpan.setAttribute('target.topic', originalTopic);
 
   return {
     success: true,
@@ -311,4 +325,5 @@ export async function replayDlqEvent(dlqEventId, options = {}) {
     status: 'replayed',
     publishResult,
   };
+  });
 }

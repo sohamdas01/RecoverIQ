@@ -1,8 +1,15 @@
 import express from 'express';
 import cors from 'cors';
 import * as dotenv from 'dotenv';
-import { config } from './services/config/index.js';
+import { config, validateProductionConfig } from './services/config/index.js';
 import { errorHandler } from './api/middleware/error.middleware.js';
+import { correlationMiddleware } from './api/middleware/correlation.middleware.js';
+import { metricsMiddleware } from './api/middleware/metrics.middleware.js';
+import { tracingMiddleware } from './api/middleware/tracing.middleware.js';
+
+// Validate production secrets configuration if running in production mode
+validateProductionConfig();
+
 
 import simulateRoutes from './api/routes/simulate.routes.js';
 import transactionsRoutes from './api/routes/transactions.routes.js';
@@ -11,6 +18,8 @@ import recoveryRoutes from './api/routes/recovery.routes.js';
 import webhooksRoutes from './api/routes/webhooks.routes.js';
 import adminRoutes from './api/routes/admin-events.routes.js';
 import recoveryCasesRoutes from './api/routes/recovery-cases.routes.js';
+import healthRoutes from './api/routes/health.routes.js';
+import metricsRoutes from './api/routes/metrics.routes.js';
 
 import { checkKafkaHealth, initKafkaTopics, disconnectKafka } from './kafka/kafka.client.js';
 import { startRecoveryConsumer, stopRecoveryConsumer } from './kafka/consumers/recovery.consumer.js';
@@ -23,25 +32,16 @@ const app = express();
 // Middleware
 app.use(cors({ origin: '*' }));
 app.use(express.json());
+app.use(tracingMiddleware);
+app.use(correlationMiddleware);
+app.use(metricsMiddleware);
 
-// Health Check
-app.get('/health', async (req, res) => {
-  const kafkaHealth = await checkKafkaHealth();
-  res.status(200).json({
-    status: 'healthy',
-    service: 'recoveriq-backend',
-    version: '1.0.0',
-    timestamp: new Date().toISOString(),
-    kafka: kafkaHealth,
-  });
-});
 
-// Dedicated Kafka Health Probe
-app.get('/health/kafka', async (req, res) => {
-  const kafkaHealth = await checkKafkaHealth();
-  const statusCode = kafkaHealth.status === 'healthy' ? 200 : 503;
-  res.status(statusCode).json(kafkaHealth);
-});
+// Health & Readiness Probes
+app.use('/health', healthRoutes);
+
+// Prometheus Metrics Endpoint
+app.use('/metrics', metricsRoutes);
 
 // API Routes
 app.use('/api/simulate', simulateRoutes);

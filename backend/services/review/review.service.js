@@ -24,10 +24,14 @@ import { executeTool } from '../tools/index.js';
 import { acquireLock, releaseLock } from '../../redis/redis.client.js';
 import { publishOutcomeEvent } from '../../kafka/producer.js';
 import { EVENT_TYPES, OUTCOME_TYPES } from '../../kafka/schemas/events.schema.js';
-import { ObservabilityService, AUDIT_EVENT_TYPES } from '../observability/index.js';
+import { ObservabilityService, AUDIT_EVENT_TYPES, withSpan } from '../observability/index.js';
 import { db } from '../../db/index.js';
 import { decisions } from '../../../drizzle/schema.js';
 import { eq } from 'drizzle-orm';
+import { logger, updateCorrelationContext } from '../logger/index.js';
+import { metrics } from '../metrics/index.js';
+
+const reviewLogger = logger.withComponent('review_service');
 
 export const REVIEW_STATUSES = {
   PENDING_REVIEW: 'PENDING_REVIEW',
@@ -114,24 +118,31 @@ export class ReviewService {
    * Re-evaluates policy fresh with merchant approval, executes tool on ALLOW, and records audit trail.
    */
   static async approveCase(caseId, { reviewerId = 'merchant_admin', reasoning = 'Approved by merchant' } = {}) {
-    const lockKey = `lock:review:${caseId}`;
-    const acquired = await acquireLock(lockKey, 10);
-    if (!acquired) {
-      const err = new Error('A concurrent review action is currently in progress for this recovery case');
-      err.statusCode = 409;
-      err.code = 'CONCURRENT_REVIEW_CONFLICT';
-      throw err;
-    }
-
-    try {
-      // 1. Fetch fresh authoritative state
-      const record = await getDecisionById(caseId);
-      if (!record) {
-        const err = new Error(`Recovery case '${caseId}' not found`);
-        err.statusCode = 404;
-        err.code = 'CASE_NOT_FOUND';
+    return withSpan('hitl.review', {
+      attributes: {
+        'case.id': caseId,
+        'hitl.action': 'APPROVE',
+        'reviewer.id': reviewerId,
+      },
+    }, async (reviewSpan) => {
+      const lockKey = `lock:review:${caseId}`;
+      const acquired = await acquireLock(lockKey, 10);
+      if (!acquired) {
+        const err = new Error('A concurrent review action is currently in progress for this recovery case');
+        err.statusCode = 409;
+        err.code = 'CONCURRENT_REVIEW_CONFLICT';
         throw err;
       }
+
+      try {
+        // 1. Fetch fresh authoritative state
+        const record = await getDecisionById(caseId);
+        if (!record) {
+          const err = new Error(`Recovery case '${caseId}' not found`);
+          err.statusCode = 404;
+          err.code = 'CASE_NOT_FOUND';
+          throw err;
+        }
 
       const { decision, transaction, customer } = record;
 
@@ -318,6 +329,21 @@ export class ReviewService {
 
       await publishOutcomeEvent(outcomePayload);
 
+      metrics.recordHitlReview('approve', executionResult ? executionResult.success : true);
+
+      reviewLogger.info('review_case_approved', {
+        event: 'review_case_approved',
+        caseId: decision.id,
+        transactionId: transaction.id,
+        reviewerId,
+        policyDecision: policyResult.decision,
+        executed: policyResult.decision === POLICY_DECISIONS.ALLOW,
+        action: actionToExecute,
+      });
+
+      reviewSpan.setAttribute('policy.decision', policyResult.decision);
+      reviewSpan.setAttribute('recovery.outcome', outcomeStatus);
+
       return {
         success: true,
         caseId: decision.id,
@@ -336,6 +362,7 @@ export class ReviewService {
     } finally {
       await releaseLock(lockKey);
     }
+    });
   }
 
   /**
@@ -348,24 +375,32 @@ export class ReviewService {
     modifiedParams = {},
     reasoning = 'Modified parameters by merchant',
   } = {}) {
-    const lockKey = `lock:review:${caseId}`;
-    const acquired = await acquireLock(lockKey, 10);
-    if (!acquired) {
-      const err = new Error('A concurrent review action is currently in progress for this recovery case');
-      err.statusCode = 409;
-      err.code = 'CONCURRENT_REVIEW_CONFLICT';
-      throw err;
-    }
-
-    try {
-      // 1. Fetch fresh authoritative state
-      const record = await getDecisionById(caseId);
-      if (!record) {
-        const err = new Error(`Recovery case '${caseId}' not found`);
-        err.statusCode = 404;
-        err.code = 'CASE_NOT_FOUND';
+    return withSpan('hitl.review', {
+      attributes: {
+        'case.id': caseId,
+        'hitl.action': 'MODIFY',
+        'reviewer.id': reviewerId,
+        'target.action': modifiedAction || 'recommended',
+      },
+    }, async (reviewSpan) => {
+      const lockKey = `lock:review:${caseId}`;
+      const acquired = await acquireLock(lockKey, 10);
+      if (!acquired) {
+        const err = new Error('A concurrent review action is currently in progress for this recovery case');
+        err.statusCode = 409;
+        err.code = 'CONCURRENT_REVIEW_CONFLICT';
         throw err;
       }
+
+      try {
+        // 1. Fetch fresh authoritative state
+        const record = await getDecisionById(caseId);
+        if (!record) {
+          const err = new Error(`Recovery case '${caseId}' not found`);
+          err.statusCode = 404;
+          err.code = 'CASE_NOT_FOUND';
+          throw err;
+        }
 
       const { decision, transaction, customer } = record;
 
@@ -568,6 +603,22 @@ export class ReviewService {
 
       await publishOutcomeEvent(outcomePayload);
 
+      metrics.recordHitlReview('modify', executionResult ? executionResult.success : true);
+
+      reviewLogger.info('review_case_modified', {
+        event: 'review_case_modified',
+        caseId: decision.id,
+        transactionId: transaction.id,
+        reviewerId,
+        modifiedAction: targetAction,
+        policyDecision: policyResult.decision,
+        executed: policyResult.decision === POLICY_DECISIONS.ALLOW,
+        action: targetAction,
+      });
+
+      reviewSpan.setAttribute('policy.decision', policyResult.decision);
+      reviewSpan.setAttribute('recovery.outcome', outcomeStatus);
+
       return {
         success: true,
         caseId: decision.id,
@@ -586,6 +637,7 @@ export class ReviewService {
     } finally {
       await releaseLock(lockKey);
     }
+    });
   }
 
   /**
@@ -596,23 +648,30 @@ export class ReviewService {
     reviewerId = 'merchant_admin',
     reasoning = 'Rejected by merchant',
   } = {}) {
-    const lockKey = `lock:review:${caseId}`;
-    const acquired = await acquireLock(lockKey, 10);
-    if (!acquired) {
-      const err = new Error('A concurrent review action is currently in progress for this recovery case');
-      err.statusCode = 409;
-      err.code = 'CONCURRENT_REVIEW_CONFLICT';
-      throw err;
-    }
-
-    try {
-      const record = await getDecisionById(caseId);
-      if (!record) {
-        const err = new Error(`Recovery case '${caseId}' not found`);
-        err.statusCode = 404;
-        err.code = 'CASE_NOT_FOUND';
+    return withSpan('hitl.review', {
+      attributes: {
+        'case.id': caseId,
+        'hitl.action': 'REJECT',
+        'reviewer.id': reviewerId,
+      },
+    }, async (reviewSpan) => {
+      const lockKey = `lock:review:${caseId}`;
+      const acquired = await acquireLock(lockKey, 10);
+      if (!acquired) {
+        const err = new Error('A concurrent review action is currently in progress for this recovery case');
+        err.statusCode = 409;
+        err.code = 'CONCURRENT_REVIEW_CONFLICT';
         throw err;
       }
+
+      try {
+        const record = await getDecisionById(caseId);
+        if (!record) {
+          const err = new Error(`Recovery case '${caseId}' not found`);
+          err.statusCode = 404;
+          err.code = 'CASE_NOT_FOUND';
+          throw err;
+        }
 
       const { decision, transaction, customer } = record;
 
@@ -696,6 +755,20 @@ export class ReviewService {
 
       await publishOutcomeEvent(outcomePayload);
 
+      metrics.recordHitlReview('reject', true);
+
+      reviewLogger.info('review_case_rejected', {
+        event: 'review_case_rejected',
+        caseId: decision.id,
+        transactionId: transaction.id,
+        reviewerId,
+        rejectionReason: reasoning,
+        action: decision.recommendedAction,
+      });
+
+      reviewSpan.setAttribute('policy.decision', decision.guardrailResult);
+      reviewSpan.setAttribute('recovery.outcome', OUTCOME_TYPES.BLOCKED);
+
       return {
         success: true,
         caseId: decision.id,
@@ -710,6 +783,7 @@ export class ReviewService {
     } finally {
       await releaseLock(lockKey);
     }
+    });
   }
 
   /**

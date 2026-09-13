@@ -18,6 +18,9 @@ export const config = {
   jwtSecret: process.env.JWT_SECRET || 'recoveriq-jwt-secret-key-default',
   recoveryLinkSecret: process.env.RECOVERY_LINK_SECRET || 'recoveriq-recovery-link-secret-default',
   recoveryLinkExpiryHours: 24,
+  internalServiceToken: process.env.INTERNAL_SERVICE_TOKEN || 'recoveriq-internal-service-token-dev-secret',
+  mlInternalToken: process.env.ML_INTERNAL_TOKEN || process.env.INTERNAL_SERVICE_TOKEN || 'recoveriq-internal-service-token-dev-secret',
+  genaiInternalToken: process.env.GENAI_INTERNAL_TOKEN || process.env.INTERNAL_SERVICE_TOKEN || 'recoveriq-internal-service-token-dev-secret',
 
   // Razorpay
   razorpay: {
@@ -58,3 +61,69 @@ export const config = {
     entityRecheckDelayMs: parseInt(process.env.RETRY_ENTITY_DELAY_MS || '100', 10),
   },
 };
+
+export const INSECURE_DEFAULT_SECRETS = new Set([
+  'recoveriq-jwt-secret-key-default',
+  'recoveriq-jwt-secret-key',
+  'recoveriq-super-secret-jwt-key',
+  'recoveriq-super-secret-jwt-key-change-in-production',
+  'recoveriq-recovery-link-secret-default',
+  'recoveriq-recovery-link-signing-secret',
+  'recoveriq-internal-service-token-dev-secret',
+  'your-production-jwt-secret-min-32-chars',
+  'your-production-recovery-link-secret-min-32-chars',
+  'your-internal-service-token-secret',
+  'your-ml-service-token-secret',
+  'your-genai-service-token-secret',
+]);
+
+/**
+ * Validates configuration for production readiness.
+ * - In development/test mode: allows safe fallback defaults.
+ * - In production mode: strictly requires explicit, non-default environment variables.
+ *
+ * @param {Object} [env=process.env] Optional environment object for testing
+ * @returns {{ isValid: boolean, errors: string[] }} Validation result
+ * @throws {Error} In production mode if required secrets are missing or insecure
+ */
+export function validateProductionConfig(env = process.env) {
+  const isProd = (env.NODE_ENV || '').toLowerCase() === 'production';
+  if (!isProd) {
+    return { isValid: true, errors: [] };
+  }
+
+  const errors = [];
+  const requiredProductionSecrets = [
+    { key: 'JWT_SECRET', value: env.JWT_SECRET, label: 'JWT Signing Secret' },
+    { key: 'RECOVERY_LINK_SECRET', value: env.RECOVERY_LINK_SECRET, label: 'Recovery Link Secret' },
+    { key: 'DATABASE_URL', value: env.DATABASE_URL, label: 'PostgreSQL Database URL' },
+    {
+      key: 'ML_INTERNAL_TOKEN',
+      value: env.ML_INTERNAL_TOKEN || env.INTERNAL_SERVICE_TOKEN,
+      label: 'ML Service Internal Token',
+    },
+    {
+      key: 'GENAI_INTERNAL_TOKEN',
+      value: env.GENAI_INTERNAL_TOKEN || env.INTERNAL_SERVICE_TOKEN,
+      label: 'GenAI Service Internal Token',
+    },
+  ];
+
+  for (const { key, value, label } of requiredProductionSecrets) {
+    if (!value || typeof value !== 'string' || value.trim() === '') {
+      errors.push(`Missing mandatory production secret: ${key} (${label})`);
+    } else if (INSECURE_DEFAULT_SECRETS.has(value.trim())) {
+      errors.push(`Insecure default secret detected in production: ${key}='${value.trim()}'`);
+    }
+  }
+
+  if (errors.length > 0) {
+    const errorMsg = `[Config Error] Production startup failed with ${errors.length} configuration validation error(s):\n - ${errors.join('\n - ')}`;
+    const err = new Error(errorMsg);
+    err.validationErrors = errors;
+    throw err;
+  }
+
+  return { isValid: true, errors: [] };
+}
+
