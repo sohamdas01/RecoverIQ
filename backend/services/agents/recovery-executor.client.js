@@ -1,14 +1,11 @@
-/**
- * RecoverIQ Backend - Agent 2 (Recovery Executor / Action Planner) Client
- * Phase 5 - Step 3: Agent 2 Recovery Executor
- *
- * Translates Agent 1's analytical recommendation into a concrete, parameter-sanitized
- * Action Plan proposal for the Policy Engine.
- */
-
 import axios from 'axios';
 import { config } from '../config/index.js';
 import { SUPPORTED_ACTIONS } from '../policy/policy.types.js';
+import { logger } from '../logger/index.js';
+import { metrics, classifyError } from '../metrics/index.js';
+import { withSpan, injectTraceContext } from '../observability/tracing.service.js';
+
+const executorLogger = logger.withComponent('agent_executor_client');
 
 export class RecoveryExecutorClient {
   /**
@@ -26,6 +23,11 @@ export class RecoveryExecutorClient {
   static async plan({ transaction, customer, customerStats, mlPrediction, agent1Recommendation }, options = {}) {
     const startTime = Date.now();
     const timeoutMs = options.timeoutMs || 3500;
+
+    executorLogger.debug('agent2_plan_started', {
+      transactionId: transaction.id,
+      agent1Recommendation: agent1Recommendation?.recommendation,
+    });
 
     // 1. Prepare Sanitized Input Context for Agent 2
     const payload = {
@@ -59,79 +61,105 @@ export class RecoveryExecutorClient {
       availableActions: SUPPORTED_ACTIONS,
     };
 
-    try {
-      // 2. Call Internal Agent 2 API
-      const endpoint = `${config.genaiServiceUrl}/internal/recovery/plan`;
-      const response = await axios.post(endpoint, payload, { timeout: timeoutMs });
-      const latencyMs = Date.now() - startTime;
-
-      const data = response.data;
-
-      // 3. Strict Machine Validation of Agent 2 Response
-      const validated = RecoveryExecutorClient.validateResponse(data);
-      if (validated.isValid) {
-        const result = {
-          agentName: validated.data.metadata?.agentName || 'RecoveryExecutor',
-          agentVersion: validated.data.metadata?.agentVersion || 'v1.0',
-          proposedAction: validated.data.proposedAction,
-          action: validated.data.proposedAction, // Alias
-          confidence: validated.data.confidence,
-          reasonCodes: validated.data.reasonCodes || [],
-          rationale: validated.data.rationale,
-          reasoning: validated.data.rationale, // Alias
-          parameters: validated.data.parameters || {},
-          toolParams: validated.data.parameters || {}, // Alias
-          isFallback: false,
-          latencyMs,
+    return withSpan('agent2.planning', {
+      attributes: {
+        'agent.name': 'RecoveryExecutor',
+        'peer.service': 'recoveriq-genai-service',
+        'component': 'agent2_executor_client',
+      },
+    }, async (span) => {
+      try {
+        // 2. Call Internal Agent 2 API
+        const endpoint = `${config.genaiServiceUrl}/internal/recovery/plan`;
+        const headers = {
+          'x-internal-service-token': config.genaiInternalToken,
         };
+        injectTraceContext(headers);
 
-        // Observability Log
-        console.log(
-          JSON.stringify({
-            level: 'INFO',
-            event: 'AGENT_PLANNING_COMPLETED',
+        const response = await axios.post(endpoint, payload, { timeout: timeoutMs, headers });
+        const latencyMs = Date.now() - startTime;
+
+        const data = response.data;
+
+        // 3. Strict Machine Validation of Agent 2 Response
+        const validated = RecoveryExecutorClient.validateResponse(data);
+        if (validated.isValid) {
+          const result = {
+            agentName: validated.data.metadata?.agentName || 'RecoveryExecutor',
+            agentVersion: validated.data.metadata?.agentVersion || 'v1.0',
+            proposedAction: validated.data.proposedAction,
+            action: validated.data.proposedAction, // Alias
+            confidence: validated.data.confidence,
+            reasonCodes: validated.data.reasonCodes || [],
+            rationale: validated.data.rationale,
+            reasoning: validated.data.rationale, // Alias
+            parameters: validated.data.parameters || {},
+            toolParams: validated.data.parameters || {}, // Alias
+            isFallback: false,
+            latencyMs,
+          };
+
+          span.setAttribute('agent.proposed_action', result.proposedAction);
+          span.setAttribute('agent.version', result.agentVersion);
+          span.setAttribute('agent.is_fallback', false);
+
+          metrics.recordAgentInvocation('executor', false, latencyMs / 1000);
+
+          // Observability Log
+          executorLogger.info('agent2_completed', {
             agent: 'RecoveryExecutor',
+            agentVersion: result.agentVersion,
             transactionId: transaction.id,
             proposedAction: result.proposedAction,
             confidence: result.confidence,
-            latencyMs,
-          })
-        );
+            durationMs: latencyMs,
+            isFallback: false,
+          });
 
-        return result;
+          return result;
+        }
+
+        metrics.recordAgentFailure('executor', 'validation_error');
+        executorLogger.warn('agent2_validation_failed', {
+          transactionId: transaction.id,
+          error: validated.error,
+        });
+      } catch (err) {
+        const errorType = classifyError(err);
+        metrics.recordAgentFailure('executor', errorType);
+        executorLogger.warn('agent2_request_failed', {
+          transactionId: transaction.id,
+          error: err.message,
+          errorType,
+        });
       }
 
-      console.warn(
-        `[RecoveryExecutorClient] Response validation failed: ${validated.error}. Using safe fallback.`
-      );
-    } catch (err) {
-      console.warn(
-        `[RecoveryExecutorClient] GenAI service call failed (${err.message}). Using safe deterministic fallback.`
-      );
-    }
+      // 4. Safe Deterministic Fallback
+      const latencyMs = Date.now() - startTime;
+      metrics.recordAgentInvocation('executor', true, latencyMs / 1000);
+      const fallback = RecoveryExecutorClient.deterministicFallback({
+        transaction,
+        agent1Recommendation,
+      });
+      fallback.latencyMs = latencyMs;
 
-    // 4. Safe Deterministic Fallback
-    const latencyMs = Date.now() - startTime;
-    const fallback = RecoveryExecutorClient.deterministicFallback({
-      transaction,
-      agent1Recommendation,
-    });
-    fallback.latencyMs = latencyMs;
+      span.setAttribute('agent.proposed_action', fallback.proposedAction);
+      span.setAttribute('agent.version', fallback.agentVersion);
+      span.setAttribute('agent.is_fallback', true);
 
-    console.log(
-      JSON.stringify({
-        level: 'WARN',
-        event: 'AGENT_PLANNING_FALLBACK',
+      executorLogger.warn('agent2_fallback_used', {
         agent: 'RecoveryExecutor',
         transactionId: transaction.id,
         proposedAction: fallback.proposedAction,
         confidence: fallback.confidence,
-        latencyMs,
-      })
-    );
+        durationMs: latencyMs,
+        isFallback: true,
+      });
 
-    return fallback;
+      return fallback;
+    });
   }
+
 
   /**
    * Validates structure, types, allowed action enums, and parameter shapes

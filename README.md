@@ -206,27 +206,46 @@ flowchart LR
 4. **Human Review is NOT a Policy Bypass**: Merchant approvals (`APPROVE`) and parameter edits (`MODIFY`) trigger fresh, independent Policy Engine re-evaluation. Merchant review cannot force execution on terminal transactions or fraud cases.
 5. **Replay Safety & Idempotency**: Dead-letter queue (DLQ) replays generate fresh `eventId`s, preserve `originalEventId` lineage, and re-evaluate the full recovery pipeline against real-time database state.
 6. **Secret & Credential Redaction**: All audit messages, structured logs, and explainability API payloads (`GET /api/admin/recovery-cases/:caseId/explanation`) recursively scrub sensitive keys (`password`, `secret`, `token`, `apiKey`, `jwt`, `cvv`, `pan`, `card_number`).
+7. **End-to-End Context Correlation**: Every request and event lifecycle propagates `requestId`, `correlationId`, `eventId`, `transactionId`, and `caseId` seamlessly across HTTP headers, AsyncLocalStorage, Kafka headers, ML/Agent clients, and database audit logs.
+
+---
+
+## 🔍 Structured Logging & Observability
+
+RecoverIQ implements asynchronous context propagation and structured JSON logging:
+
+- **AsyncLocalStorage Context**: Holds and propagates `{ requestId, correlationId, caseId, transactionId, eventId, originalEventId, replayEventId, customerId, merchantId }` across asynchronous boundaries without manual passing.
+- **HTTP Middleware**: Automatically inspects `X-Request-Id` / `X-Correlation-Id` headers or generates cryptographically safe UUIDs, injecting response headers and binding the active request context.
+- **Kafka Header Propagation**: Producers automatically inject correlation headers into Kafka messages (`payment-events`, `recovery-outcomes`), and consumers reconstruct the exact context before pipeline execution.
+- **Microservice Client Tracing**: ML Client, Agent 1 Client, and Agent 2 Client pass correlation headers downstream to Python FastAPI microservices and log duration latencies (`durationMs`).
+- **Deep Secret Scrubbing**: All logging outputs pass through deep recursive redaction masking credentials, tokens, passwords, and payment card numbers.
 
 ---
 
 ## 🧪 Verification & Test Suite
 
-RecoverIQ features comprehensive unit, integration, resilience, agentic safety, and adversarial test suites executed across both Node.js and Python test runners:
+RecoverIQ features comprehensive unit, integration, resilience, agentic safety, structured logging, and adversarial test suites executed across both Node.js and Python test runners:
 
 ```bash
-# Backend test suite (15 test modules, 187 tests)
+# Backend test suite (17 test modules, 232 tests)
 cd backend && npm test
 
 # Python GenAI test suite (19 agent & schema tests)
 cd genai-service && py -3.11 -m pytest tests/
+
+# Python ML test suite (15 model & preprocessing tests)
+cd ml-service && py -3.11 -m pytest tests/
 ```
 
-### Test Results (Phase 5 — Step 7)
-- **Total Backend Tests**: **187 / 187 passed (100%)**
+### Test Results (Phase 6 — Step 2 Complete)
+- **Total Backend Tests**: **232 / 232 passed (100%)**
 - **Total Python GenAI Tests**: **19 / 19 passed (100%)**
-- **Total Project Tests**: **206 / 206 passed across entire platform**
+- **Total Python ML Tests**: **15 / 15 passed (100%)**
+- **Total Project Tests**: **266 / 266 passed across entire platform (100%)**
 
 ### Test Suite Modules
+* `metrics-health.test.js` — Prometheus `/metrics` exposition format, HTTP latency histograms, multi-agent/ML/policy/tool/HITL/Kafka/DLQ metrics, `/health/live` & `/health/ready` probes, dependency failure isolation, and label cardinality bounds.
+* `structured-logging-correlation.test.js` — Express correlation middleware, AsyncLocalStorage propagation, JSON structured logger, recursive secret redaction, Kafka header injection, and consumer context restoration.
 * `agent-safety-evaluation.test.js` — 12-suite adversarial verification: prompt injection, schema tampering, agent disagreements, policy bypass attempts, human concurrency, and 14-scenario evaluation matrix.
 * `decision-persistence-audit.test.js` — Full decision lineage, agent output immutability, audit logging, and explanation API reconstructability.
 * `human-in-the-loop.test.js` — State machine verification for `pending_review`, merchant `APPROVE`, `MODIFY`, `REJECT`, and Redis distributed locking.

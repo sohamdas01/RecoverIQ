@@ -15,10 +15,14 @@ import { RecoveryExecutorClient } from '../agents/recovery-executor.client.js';
 import { evaluatePolicy, POLICY_DECISIONS } from '../policy/index.js';
 import { executeTool } from '../tools/index.js';
 import { getMLPrediction } from '../ml/index.js';
-import { ObservabilityService, AUDIT_EVENT_TYPES } from '../observability/index.js';
+import { ObservabilityService, AUDIT_EVENT_TYPES, withSpan } from '../observability/index.js';
 import { createDecision } from '../../db/queries/decisions.queries.js';
 import { createAction, updateActionResult } from '../../db/queries/actions.queries.js';
 import { EVENT_TYPES, OUTCOME_TYPES } from '../../kafka/schemas/events.schema.js';
+import { logger, updateCorrelationContext } from '../logger/index.js';
+import { metrics } from '../metrics/index.js';
+
+const orchestratorLogger = logger.withComponent('recovery_orchestrator');
 
 export class RecoveryOrchestrator {
   /**
@@ -41,9 +45,35 @@ export class RecoveryOrchestrator {
     replayEventId: directReplayEventId = null,
     options = {},
   }) {
-    const startTime = Date.now();
     const eventId = directEventId || options.eventId || crypto.randomUUID();
     const replayEventId = directReplayEventId || options.replayEventId || null;
+
+    return withSpan('recovery.pipeline', {
+      attributes: {
+        'transaction.id': transaction.id,
+        'event.id': eventId,
+        'customer.id': customer?.id || transaction.customerId || 'unknown',
+        ...(originalEventId ? { 'lineage.original_event_id': originalEventId } : {}),
+        ...(replayEventId ? { 'lineage.replay_event_id': replayEventId } : {}),
+      },
+    }, async (pipelineSpan) => {
+      const startTime = Date.now();
+
+    updateCorrelationContext({
+      eventId,
+      transactionId: transaction.id,
+      customerId: customer?.id || transaction.customerId,
+      originalEventId,
+      replayEventId,
+    });
+
+    orchestratorLogger.info('recovery_pipeline_started', {
+      event: 'recovery_pipeline_started',
+      transactionId: transaction.id,
+      amount: parseFloat(transaction.amount),
+      failureReason: transaction.failureReason,
+      paymentMethod: transaction.paymentMethod,
+    });
 
     // Record Ingestion Audit Event
     await ObservabilityService.recordLifecycleEvent({
@@ -78,6 +108,13 @@ export class RecoveryOrchestrator {
       is_subscription: transaction.paymentMethod === 'subscription_mandate',
     });
 
+    orchestratorLogger.info('ml_inference_completed', {
+      event: 'ml_inference_completed',
+      mlScore: mlPrediction.probability,
+      modelVersion: mlPrediction.model_version,
+      isFallback: mlPrediction.model_version?.includes('fallback') || false,
+    });
+
     // -------------------------------------------------------------
     // Step 2: Agent 1 (Recovery Analyst) Strategic Analysis
     // -------------------------------------------------------------
@@ -87,6 +124,13 @@ export class RecoveryOrchestrator {
       customerStats,
       mlPrediction,
     }, options.agent1Options || {});
+
+    orchestratorLogger.info('agent1_analyst_completed', {
+      event: 'agent1_analyst_completed',
+      recommendation: agent1Analysis.recommendation,
+      confidence: agent1Analysis.confidence,
+      isFallback: agent1Analysis.isFallback || false,
+    });
 
     // -------------------------------------------------------------
     // Step 3: Agent 2 (Recovery Executor / Action Planner) Proposal
@@ -98,6 +142,13 @@ export class RecoveryOrchestrator {
       mlPrediction,
       agent1Recommendation: agent1Analysis,
     }, options.agent2Options || {});
+
+    orchestratorLogger.info('agent2_executor_completed', {
+      event: 'agent2_executor_completed',
+      proposedAction: agent2Proposal.proposedAction,
+      confidence: agent2Proposal.confidence,
+      isFallback: agent2Proposal.isFallback || false,
+    });
 
     // -------------------------------------------------------------
     // Step 4: Backend Sanitization & Policy Context Normalization
@@ -132,7 +183,29 @@ export class RecoveryOrchestrator {
     // -------------------------------------------------------------
     // Step 5: Policy Engine Evaluation (Sole Backend Authority)
     // -------------------------------------------------------------
-    const policyResult = evaluatePolicy(normalizedPolicyContext);
+    const policyResult = await withSpan('policy.evaluation', {
+      attributes: {
+        'transaction.id': transaction.id,
+        'ml.probability': mlPrediction.probability,
+        'agent1.recommendation': agent1Analysis.recommendation,
+        'agent2.proposed_action': agent2Proposal.proposedAction,
+      },
+    }, async (policySpan) => {
+      const result = evaluatePolicy(normalizedPolicyContext);
+      policySpan.setAttribute('policy.decision', result.decision);
+      if (result.ruleId) policySpan.setAttribute('policy.rule_id', result.ruleId);
+      if (result.policyVersion) policySpan.setAttribute('policy.version', result.policyVersion);
+      return result;
+    });
+    metrics.recordPolicyEvaluation(policyResult.decision, policyResult.policyVersion);
+
+    orchestratorLogger.info('policy_evaluation_completed', {
+      event: 'policy_evaluation_completed',
+      decision: policyResult.decision,
+      ruleId: policyResult.ruleId,
+      appliedRules: policyResult.appliedRules,
+      policyVersion: policyResult.policyVersion,
+    });
 
     // Record Policy Evaluation Audit Event
     await ObservabilityService.recordLifecycleEvent({
@@ -233,6 +306,17 @@ export class RecoveryOrchestrator {
       status: decisionStatus,
     });
 
+    updateCorrelationContext({ caseId: decision.id });
+    pipelineSpan.setAttribute('case.id', decision.id);
+
+    orchestratorLogger.info('decision_persisted', {
+      event: 'decision_persisted',
+      caseId: decision.id,
+      decisionStatus,
+      guardrailResult: policyResult.decision,
+      recommendedAction: agent2Proposal.proposedAction,
+    });
+
     // -------------------------------------------------------------
     // Step 7: Execution Gate (Strict Policy Authority Gate)
     // -------------------------------------------------------------
@@ -257,14 +341,32 @@ export class RecoveryOrchestrator {
       });
 
       // Execute bounded tool
-      executionResult = await executeTool(agent2Proposal.proposedAction, {
-        ...sanitizedParams,
-        transactionId: transaction.id,
-        amount: parseFloat(transaction.amount),
-        currency: transaction.currency,
+      executionResult = await withSpan('tool.execution', {
+        attributes: {
+          'tool.name': agent2Proposal.proposedAction,
+          'transaction.id': transaction.id,
+          'case.id': decision.id,
+        },
+      }, async (toolSpan) => {
+        const result = await executeTool(agent2Proposal.proposedAction, {
+          ...sanitizedParams,
+          transactionId: transaction.id,
+          amount: parseFloat(transaction.amount),
+          currency: transaction.currency,
+        });
+        toolSpan.setAttribute('tool.success', !!result.success);
+        return result;
       });
 
       const execDurationMs = Date.now() - toolExecStartTime;
+      metrics.recordToolExecution(agent2Proposal.proposedAction, executionResult.success, execDurationMs / 1000);
+
+      orchestratorLogger.info('tool_execution_completed', {
+        event: 'tool_execution_completed',
+        toolName: agent2Proposal.proposedAction,
+        success: executionResult.success,
+        durationMs: execDurationMs,
+      });
 
       // Update action record in DB
       if (actionRecord?.id) {
@@ -308,6 +410,13 @@ export class RecoveryOrchestrator {
       outcomeEventType = EVENT_TYPES.RECOVERY_SCHEDULED;
       outcomeStatus = OUTCOME_TYPES.PENDING_REVIEW;
       executionResult = null;
+      metrics.recordHitlPendingCreated();
+
+      orchestratorLogger.info('recovery_pending_review', {
+        event: 'recovery_pending_review',
+        caseId: decision.id,
+        ruleId: policyResult.ruleId,
+      });
 
       await ObservabilityService.recordLifecycleEvent({
         transactionId: transaction.id,
@@ -325,6 +434,12 @@ export class RecoveryOrchestrator {
       outcomeStatus = OUTCOME_TYPES.BLOCKED;
       executionResult = null;
 
+      orchestratorLogger.info('recovery_blocked', {
+        event: 'recovery_blocked',
+        caseId: decision.id,
+        ruleId: policyResult.ruleId,
+      });
+
       await ObservabilityService.recordLifecycleEvent({
         transactionId: transaction.id,
         caseId: decision.id,
@@ -340,6 +455,16 @@ export class RecoveryOrchestrator {
     // -------------------------------------------------------------
     // Step 8: Construct Complete Outcome Event Payload
     // -------------------------------------------------------------
+    const totalDurationMs = Date.now() - startTime;
+    metrics.recordRecoveryPipeline(outcomeStatus, agent2Proposal.proposedAction, totalDurationMs / 1000);
+    orchestratorLogger.info('recovery_pipeline_completed', {
+      event: 'recovery_pipeline_completed',
+      caseId: decision.id,
+      outcome: outcomeStatus,
+      decision: policyResult.decision,
+      durationMs: totalDurationMs,
+    });
+
     const outcomePayload = {
       eventId: crypto.randomUUID(),
       eventType: outcomeEventType,
@@ -371,6 +496,10 @@ export class RecoveryOrchestrator {
       version: 1,
     };
 
+    pipelineSpan.setAttribute('policy.decision', policyResult.decision);
+    pipelineSpan.setAttribute('recovery.outcome', outcomeStatus);
+    pipelineSpan.setAttribute('agent.action', agent2Proposal.proposedAction);
+
     return {
       transaction,
       customer,
@@ -385,7 +514,8 @@ export class RecoveryOrchestrator {
       outcomeStatus,
       outcomeEventType,
       outcomePayload,
-      durationMs: Date.now() - startTime,
+      durationMs: totalDurationMs,
     };
+    });
   }
 }

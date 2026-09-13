@@ -200,29 +200,53 @@ flowchart LR
 
 ---
 
+---
+
 ## 6. Security Boundaries
 
-1. **Authority Enforcement**: Machine learning models provide recommendations only. The backend policy engine in Node.js owns all execution authority and security guardrails.
-2. **Internal Service Isolation**: Downstream ML and GenAI microservices are not exposed to the public internet; all interactions are mediated through the backend API.
-3. **Admin Replay Authentication**: All replay and DLQ inspection endpoints require valid JWT authentication via `requireMerchantAuth`.
-4. **PII Minimization**: Kafka payloads never transmit raw customer PII (names, emails, phones). Workers resolve customer profile data directly from PostgreSQL using opaque keys.
+1. **Authority Enforcement**: Machine learning models and GenAI agents provide suggestions only. The backend policy engine in Node.js owns all execution authority and security guardrails.
+2. **Internal Service Isolation**: Downstream ML (`recoveriq-ml-service`) and GenAI (`recoveriq-genai-service`) microservices are strictly internal and inaccessible to the browser/public network.
+3. **Internal Service Authentication**: All inter-service communications (`Backend -> ML`, `Backend -> GenAI`) require a pre-shared cryptographic service token passed via `x-internal-service-token` or `Authorization: Bearer <token>`. Unauthorized requests are rejected with `401 Unauthorized` / `403 Forbidden`.
+4. **Admin Authentication**: All replay, review, and DLQ inspection endpoints require valid JWT authentication via `requireMerchantAuth`.
+5. **PII Minimization**: Kafka payloads and internal microservice contexts never transmit unnecessary raw customer PII. Workers resolve customer profile data directly from PostgreSQL using opaque keys.
 
 ---
 
-## 7. Current Implementation Scope (Phase 4 vs Phase 5)
+## 7. Service Boundary Topology & Token Flow
 
-| Capability | Phase 4 (Current) | Phase 5+ (Future / Planned) |
-|---|:---:|:---:|
-| **Kafka Event Backbone (Redpanda)** | ✅ Implemented | — |
-| **Decoupled Webhook Ingestion Producer** | ✅ Implemented | — |
-| **Recovery Consumer (`recovery-worker-group`)** | ✅ Implemented | — |
-| **Outcome Consumer (`outcome-worker-group`)** | ✅ Implemented | — |
-| **Phase 3 ML Model Integration (LightGBM + SHAP)** | ✅ Implemented | — |
-| **3-Way Guardrails (`ALLOW` / `APPROVE` / `BLOCK`)** | ✅ Implemented | — |
-| **Exponential Backoff & Jitter Retries** | ✅ Implemented | — |
-| **Dead-Letter Queue (`dead-letter-events`)** | ✅ Implemented | — |
-| **Admin Event Replay (CLI & REST API)** | ✅ Implemented | — |
-| **Multi-Agent Negotiation Framework** | ❌ Not in Phase 4 | 🔮 Phase 5 |
-| **Autonomous Policy Self-Optimization** | ❌ Not in Phase 4 | 🔮 Phase 5 |
-| **RAG Knowledge Retrieval Engine** | ❌ Not in Phase 4 | 🔮 Phase 5 |
-| **OpenTelemetry Distributed Tracing Mesh** | ❌ Not in Phase 4 | 🔮 Phase 5 |
+```mermaid
+flowchart TD
+    subgraph PublicHost["Public / Host Layer"]
+        BROWSER["Web Browser / Client UI"]
+        GATEWAY["Payment Gateway Webhooks"]
+    end
+
+    subgraph ApiBoundary["Public API Authority (Port 4000)"]
+        BACKEND["RecoverIQ Backend API\n(Node.js / Express)\n- JWT Auth / Merchant Session\n- Idempotency & Rate Limiting\n- Policy Engine Guardrail Gate"]
+    end
+
+    subgraph InternalServices["Isolated Internal Microservices (Port 8000 / 8001)"]
+        direction TB
+        ML["ML Service (FastAPI :8000)\n- POST /predict\n- Validates x-internal-service-token\n- Zero DB Writes"]
+        GENAI["GenAI Service (FastAPI :8001)\n- POST /internal/recovery/analyze\n- POST /internal/recovery/plan\n- Validates x-internal-service-token"]
+    end
+
+    BROWSER -->|Public HTTPS / REST| BACKEND
+    GATEWAY -->|Signed Webhook| BACKEND
+
+    BROWSER -.->|BLOCKED / 401 Unauthorized| ML
+    BROWSER -.->|BLOCKED / 401 Unauthorized| GENAI
+
+    BACKEND -->|x-internal-service-token: ML_INTERNAL_TOKEN| ML
+    BACKEND -->|x-internal-service-token: GENAI_INTERNAL_TOKEN| GENAI
+```
+
+### Internal Token Configuration
+| Environment Variable | Description | Default Dev Secret | Protected Endpoints |
+|---|---|---|---|
+| `INTERNAL_SERVICE_TOKEN` | Global shared fallback token for internal microservices | `recoveriq-internal-service-token-dev-secret` | All internal APIs |
+| `ML_INTERNAL_TOKEN` | Specific token required by `ml-service` | `recoveriq-internal-service-token-dev-secret` | `/predict` |
+| `GENAI_INTERNAL_TOKEN` | Specific token required by `genai-service` | `recoveriq-internal-service-token-dev-secret` | `/internal/recovery/*`, `/analyze` |
+
+Health probes (`/health`, `/health/live`, `/health/ready`) remain open to orchestrator health checks without requiring internal tokens.
+

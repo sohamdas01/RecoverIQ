@@ -1,4 +1,4 @@
-﻿"""
+"""
 RecoverIQ ML Service — FastAPI Online Inference Service
 -------------------------------------------------------
 Exposes:
@@ -13,12 +13,16 @@ Invariants:
 """
 
 import os
+import hmac
 import json
 import logging
 from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request, status
+from dotenv import load_dotenv
+load_dotenv()
+
+from fastapi import FastAPI, HTTPException, Request, Header, Depends, status
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field, field_validator
@@ -186,12 +190,107 @@ async def generic_exception_handler(request: Request, exc: Exception):
 
 
 # ---------------------------------------------------------
+# Internal Service Boundary Protection & Production Validation
+# ---------------------------------------------------------
+
+ENVIRONMENT = os.getenv("ENVIRONMENT") or os.getenv("ENV") or os.getenv("NODE_ENV") or "development"
+IS_PRODUCTION = ENVIRONMENT.lower() == "production"
+
+INSECURE_DEV_SECRETS = {
+    "recoveriq-internal-service-token-dev-secret",
+    "your-shared-internal-service-token-secret",
+    "your-ml-service-internal-token-secret",
+}
+
+def get_ml_internal_token() -> str:
+    token = os.getenv("ML_INTERNAL_TOKEN") or os.getenv("INTERNAL_SERVICE_TOKEN")
+    if not token or token.strip() == "":
+        if IS_PRODUCTION:
+            raise RuntimeError(
+                "[Config Error] ML_INTERNAL_TOKEN or INTERNAL_SERVICE_TOKEN must be explicitly set in production mode."
+            )
+        return "recoveriq-internal-service-token-dev-secret"
+
+    if IS_PRODUCTION and token.strip() in INSECURE_DEV_SECRETS:
+        raise RuntimeError(
+            f"[Config Error] Insecure default internal token detected in production: '{token}'"
+        )
+    return token.strip()
+
+ML_INTERNAL_TOKEN = get_ml_internal_token()
+
+async def verify_internal_token(
+    x_internal_service_token: Optional[str] = Header(None, alias="x-internal-service-token"),
+    authorization: Optional[str] = Header(None),
+):
+    """
+    Validates that incoming internal service requests possess the authoritative internal token.
+    Returns 401 Unauthorized if token is missing.
+    Returns 403 Forbidden if token is invalid.
+    """
+    token = x_internal_service_token
+    if not token and authorization:
+        if authorization.startswith("Bearer "):
+            token = authorization[7:].strip()
+        else:
+            token = authorization.strip()
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing internal service token (x-internal-service-token header required).",
+        )
+
+    current_token = get_ml_internal_token()
+    if not hmac.compare_digest(token, current_token):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid internal service token.",
+        )
+    return token
+
+
+# ---------------------------------------------------------
 # API Endpoints
 # ---------------------------------------------------------
 
+@app.get("/health/live")
+async def liveness_probe():
+    """Liveness probe: returns 200 if the process is up."""
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"status": "alive", "service": "recoveriq-ml-service"},
+    )
+
+
+@app.get("/health/ready")
+async def readiness_probe():
+    """Readiness probe: returns 200 only if model and explainer are loaded."""
+    is_loaded = model_container["explainer"] is not None
+    if not is_loaded:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "status": "not_ready",
+                "service": "recoveriq-ml-service",
+                "model_loaded": False,
+                "reason": "ML model artifact not loaded",
+            },
+        )
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={
+            "status": "ready",
+            "service": "recoveriq-ml-service",
+            "model_loaded": True,
+            "model_version": model_container["model_version"],
+        },
+    )
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Health & Readiness probe endpoint."""
+    """Combined health probe endpoint for backward compatibility."""
     is_loaded = model_container["explainer"] is not None
     return HealthResponse(
         status="healthy" if is_loaded else "degraded",
@@ -201,7 +300,7 @@ async def health_check():
     )
 
 
-@app.post("/predict", response_model=PredictResponse)
+@app.post("/predict", response_model=PredictResponse, dependencies=[Depends(verify_internal_token)])
 async def predict_recovery_probability(payload: PredictRequest):
     """
     Predicts payment recovery probability and returns grounded SHAP reason codes.

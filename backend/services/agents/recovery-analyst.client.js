@@ -10,6 +10,11 @@
 import axios from 'axios';
 import { config } from '../config/index.js';
 import { SUPPORTED_ACTIONS } from '../policy/policy.types.js';
+import { logger } from '../logger/index.js';
+import { metrics, classifyError } from '../metrics/index.js';
+import { withSpan, injectTraceContext } from '../observability/tracing.service.js';
+
+const analystLogger = logger.withComponent('agent_analyst_client');
 
 export class RecoveryAnalystClient {
   /**
@@ -26,6 +31,12 @@ export class RecoveryAnalystClient {
   static async analyze({ transaction, customer, customerStats, mlPrediction }, options = {}) {
     const startTime = Date.now();
     const timeoutMs = options.timeoutMs || 3500;
+
+    analystLogger.debug('agent1_analyze_started', {
+      transactionId: transaction.id,
+      amount: parseFloat(transaction.amount),
+      failureReason: transaction.failureReason,
+    });
 
     // 1. Prepare Sanitized Input Context (NO unnecessary PII)
     const payload = {
@@ -54,80 +65,104 @@ export class RecoveryAnalystClient {
       attemptCount: transaction.attemptCount || 1,
     };
 
-    try {
-      // 2. Call Internal Agent 1 API
-      const endpoint = `${config.genaiServiceUrl}/internal/recovery/analyze`;
-      const response = await axios.post(endpoint, payload, { timeout: timeoutMs });
-      const latencyMs = Date.now() - startTime;
-
-      const data = response.data;
-
-      // 3. Strict Machine Validation of Agent 1 Response
-      const validated = RecoveryAnalystClient.validateResponse(data);
-      if (validated.isValid) {
-        const result = {
-          agentName: validated.data.metadata?.agentName || 'RecoveryAnalyst',
-          agentVersion: validated.data.metadata?.agentVersion || 'v1.0',
-          recommendation: validated.data.recommendation,
-          action: validated.data.recommendation, // Backwards compatibility alias
-          confidence: validated.data.confidence,
-          reasonCodes: validated.data.reasonCodes || [],
-          rationale: validated.data.rationale,
-          reasoning: validated.data.rationale, // Backwards compatibility alias
-          suggestedParameters: validated.data.suggestedParameters || {},
-          toolParams: validated.data.suggestedParameters || {}, // Backwards compatibility alias
-          playbookStrategy: validated.data.metadata?.playbookStrategy || null,
-          isFallback: false,
-          latencyMs,
+    return withSpan('agent1.analysis', {
+      attributes: {
+        'agent.name': 'RecoveryAnalyst',
+        'peer.service': 'recoveriq-genai-service',
+        'component': 'agent1_analyst_client',
+      },
+    }, async (span) => {
+      try {
+        // 2. Call Internal Agent 1 API
+        const endpoint = `${config.genaiServiceUrl}/internal/recovery/analyze`;
+        const headers = {
+          'x-internal-service-token': config.genaiInternalToken,
         };
+        injectTraceContext(headers);
 
-        // Observability Log
-        console.log(
-          JSON.stringify({
-            level: 'INFO',
-            event: 'AGENT_ANALYSIS_COMPLETED',
+        const response = await axios.post(endpoint, payload, { timeout: timeoutMs, headers });
+        const latencyMs = Date.now() - startTime;
+
+        const data = response.data;
+
+        // 3. Strict Machine Validation of Agent 1 Response
+        const validated = RecoveryAnalystClient.validateResponse(data);
+        if (validated.isValid) {
+          const result = {
+            agentName: validated.data.metadata?.agentName || 'RecoveryAnalyst',
+            agentVersion: validated.data.metadata?.agentVersion || 'v1.0',
+            recommendation: validated.data.recommendation,
+            action: validated.data.recommendation, // Backwards compatibility alias
+            confidence: validated.data.confidence,
+            reasonCodes: validated.data.reasonCodes || [],
+            rationale: validated.data.rationale,
+            reasoning: validated.data.rationale, // Backwards compatibility alias
+            suggestedParameters: validated.data.suggestedParameters || {},
+            toolParams: validated.data.suggestedParameters || {}, // Backwards compatibility alias
+            playbookStrategy: validated.data.metadata?.playbookStrategy || null,
+            isFallback: false,
+            latencyMs,
+          };
+
+          span.setAttribute('agent.recommendation', result.recommendation);
+          span.setAttribute('agent.version', result.agentVersion);
+          span.setAttribute('agent.is_fallback', false);
+
+          metrics.recordAgentInvocation('analyst', false, latencyMs / 1000);
+
+          // Observability Log
+          analystLogger.info('agent1_completed', {
             agent: 'RecoveryAnalyst',
+            agentVersion: result.agentVersion,
             transactionId: transaction.id,
             recommendation: result.recommendation,
             confidence: result.confidence,
-            latencyMs,
-          })
-        );
+            durationMs: latencyMs,
+            isFallback: false,
+          });
 
-        return result;
+          return result;
+        }
+
+        metrics.recordAgentFailure('analyst', 'validation_error');
+        analystLogger.warn('agent1_validation_failed', {
+          transactionId: transaction.id,
+          error: validated.error,
+        });
+      } catch (err) {
+        const errorType = classifyError(err);
+        metrics.recordAgentFailure('analyst', errorType);
+        analystLogger.warn('agent1_request_failed', {
+          transactionId: transaction.id,
+          error: err.message,
+          errorType,
+        });
       }
 
-      console.warn(
-        `[RecoveryAnalystClient] Response validation failed: ${validated.error}. Using safe fallback.`
-      );
-    } catch (err) {
-      console.warn(
-        `[RecoveryAnalystClient] GenAI service call failed (${err.message}). Using safe deterministic fallback.`
-      );
-    }
+      // 4. Safe Deterministic Fallback (Model failure does NOT result in unvalidated action)
+      const latencyMs = Date.now() - startTime;
+      metrics.recordAgentInvocation('analyst', true, latencyMs / 1000);
+      const fallback = RecoveryAnalystClient.deterministicFallback({
+        transaction,
+        customerStats,
+        mlPrediction,
+      });
+      fallback.latencyMs = latencyMs;
 
-    // 4. Safe Deterministic Fallback (Model failure does NOT result in unvalidated action)
-    const latencyMs = Date.now() - startTime;
-    const fallback = RecoveryAnalystClient.deterministicFallback({
-      transaction,
-      customerStats,
-      mlPrediction,
-    });
-    fallback.latencyMs = latencyMs;
+      span.setAttribute('agent.recommendation', fallback.recommendation);
+      span.setAttribute('agent.version', fallback.agentVersion);
+      span.setAttribute('agent.is_fallback', true);
 
-    console.log(
-      JSON.stringify({
-        level: 'WARN',
-        event: 'AGENT_ANALYSIS_FALLBACK',
-        agent: 'RecoveryAnalyst',
+      analystLogger.warn('agent1_fallback_used', {
         transactionId: transaction.id,
         recommendation: fallback.recommendation,
-        confidence: fallback.confidence,
-        latencyMs,
-      })
-    );
+        reason: fallback.rationale,
+        durationMs: latencyMs,
+        isFallback: true,
+      });
 
-    return fallback;
+      return fallback;
+    });
   }
 
   /**
