@@ -1,10 +1,31 @@
 /**
  * RecoverIQ Recovery Cases Admin Review Controller
  * Phase 5 - Step 5: Human-in-the-Loop Approval Workflow
+ * Phase 7 - Step 3: Live Recovery Activity Feed
  */
 
 import { ReviewService } from '../../services/review/index.js';
 import { ObservabilityService } from '../../services/observability/index.js';
+import { AskRecoverIQService } from '../../services/ask/ask.service.js';
+
+/**
+ * GET /api/admin/recovery-cases/activity
+ * Returns recent sanitized recovery lifecycle events
+ */
+export async function getRecoveryActivity(req, res, next) {
+  try {
+    const limit = parseInt(req.query.limit || '50', 10);
+    const activity = await ObservabilityService.getRecentActivity(limit);
+
+    return res.status(200).json({
+      success: true,
+      count: activity.length,
+      data: activity,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
 
 /**
  * GET /api/admin/recovery-cases/:caseId/review
@@ -134,6 +155,34 @@ export async function rejectRecoveryCase(req, res, next) {
         message: error.message,
       });
     }
+    next(error);
+  }
+}
+
+/**
+ * POST /api/admin/ask or /api/admin/recovery-cases/ask
+ * Ask RecoverIQ Grounded Explainer QA
+ */
+export async function askRecoverIQ(req, res, next) {
+  try {
+    const { question, caseId } = req.body || {};
+    if (!question || typeof question !== 'string' || question.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Question is required and must be a non-empty string.',
+      });
+    }
+
+    const result = await AskRecoverIQService.ask({
+      question: question.trim(),
+      caseId: caseId ? String(caseId).trim() : undefined,
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
     next(error);
   }
 }

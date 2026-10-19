@@ -24,7 +24,7 @@ export class RecoveryAnalystClient {
    * @param {Object} params.transaction Authoritative transaction object from PostgreSQL
    * @param {Object} params.customer Customer record
    * @param {Object} params.customerStats Historical stats
-   * @param {Object} params.mlPrediction ML prediction from LightGBM model
+   * @param {Object} params.mlPrediction ML prediction from XGBoost model
    * @param {Object} options Optional client options (e.g. timeout)
    * @returns {Promise<Object>} Validated Agent 1 recommendation
    */
@@ -100,6 +100,7 @@ export class RecoveryAnalystClient {
             suggestedParameters: validated.data.suggestedParameters || {},
             toolParams: validated.data.suggestedParameters || {}, // Backwards compatibility alias
             playbookStrategy: validated.data.metadata?.playbookStrategy || null,
+            playbookSources: validated.data.playbookSources || [],
             isFallback: false,
             latencyMs,
           };
@@ -197,6 +198,7 @@ export class RecoveryAnalystClient {
         rationale: rationale.trim(),
         reasonCodes: Array.isArray(data.reasonCodes) ? data.reasonCodes : [],
         suggestedParameters: data.suggestedParameters || data.toolParams || {},
+        playbookSources: Array.isArray(data.playbookSources) ? data.playbookSources : [],
       },
     };
   }
@@ -229,6 +231,7 @@ export class RecoveryAnalystClient {
           templateId: 'card_expired_update_v1',
           customMessage: 'Your card on file has expired. Click below to update payment details securely.',
         },
+        playbookSources: [{ playbookId: 'PB-04', failureType: 'card_expired', ruleTitle: 'Card Expired — Direct Retry Suppression & Self-Service Link' }],
         isFallback: true,
       };
     }
@@ -245,11 +248,14 @@ export class RecoveryAnalystClient {
         reasoning: 'High risk fraud detected. Escalating immediately to risk operations.',
         suggestedParameters: { priority: 'urgent', reason: 'Flagged for high-risk fraud activity.' },
         toolParams: { priority: 'urgent', reason: 'Flagged for high-risk fraud activity.' },
+        playbookSources: [{ playbookId: 'PB-11', failureType: 'high_risk_fraud', ruleTitle: 'High Risk Fraud — Immediate Quarantine & Escalation' }],
         isFallback: true,
       };
     }
 
     if (reason === 'bank_outage' || reason === 'network_timeout') {
+      const pId = reason === 'bank_outage' ? 'PB-06' : 'PB-08';
+      const pTitle = reason === 'bank_outage' ? 'Bank Outage — Immediate Automated Re-Capture' : 'Network Timeout — Gateway Status Inquiry & Capture Retry';
       return {
         agentName: 'RecoveryAnalyst',
         agentVersion: 'v1.0-fallback',
@@ -267,6 +273,7 @@ export class RecoveryAnalystClient {
           paymentId: `pay_${Date.now()}`,
           reason: 'Gateway/bank network glitch recovered, retrying immediate capture',
         },
+        playbookSources: [{ playbookId: pId, failureType: reason, ruleTitle: pTitle }],
         isFallback: true,
       };
     }
@@ -290,6 +297,7 @@ export class RecoveryAnalystClient {
             channel: 'email',
             templateId: 'payment_failed_alternative_method',
           },
+          playbookSources: [{ playbookId: 'PB-03', failureType: 'insufficient_funds', ruleTitle: 'Insufficient Funds — Multi-Attempt Exhaustion' }],
           isFallback: true,
         };
       }
@@ -310,6 +318,7 @@ export class RecoveryAnalystClient {
           delayHours: 6,
           reason: 'Schedule retry for standard banking settlement window',
         },
+        playbookSources: [{ playbookId: 'PB-01', failureType: 'insufficient_funds', ruleTitle: 'Insufficient Funds — Transient Off-Hours Decline' }],
         isFallback: true,
       };
     }
@@ -325,6 +334,7 @@ export class RecoveryAnalystClient {
       reasoning: 'General failure reason; routing customer to self-serve checkout link.',
       suggestedParameters: { channel: 'email' },
       toolParams: { channel: 'email' },
+      playbookSources: [{ playbookId: 'PB-FALLBACK', failureType: reason || 'unknown', ruleTitle: 'General Recovery Playbook' }],
       isFallback: true,
     };
   }

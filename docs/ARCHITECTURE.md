@@ -36,7 +36,7 @@ graph TB
     end
 
     subgraph ML_Microservice["ML Diagnostic Layer"]
-        FASTAPI["ML Inference Service\n(Python / FastAPI / LightGBM)"]
+        FASTAPI["ML Inference Service\n(Python / FastAPI / XGBoost)"]
         SHAP["Explainability Engine\n(TreeSHAP Reason Codes)"]
     end
 
@@ -82,7 +82,7 @@ graph TB
 - **Database & ORM**: PostgreSQL 16, Drizzle ORM 0.38+
 - **Cache & Distributed Locks**: Redis 7, `ioredis`
 - **Frontend Dashboard & Recovery UI**: Next.js 16 (Turbopack), React 18, Tailwind CSS
-- **ML Diagnostic Microservice**: Python 3.11+, FastAPI, LightGBM, TreeSHAP
+- **ML Diagnostic Microservice**: Python 3.11+, FastAPI, XGBoost, TreeSHAP
 - **GenAI Multi-Agent Microservice**: Python 3.11+, FastAPI, Pydantic v2, Qdrant RAG client
 - **Testing**: Node.js native test runner (`node --test`), `pytest`
 
@@ -115,7 +115,7 @@ sequenceDiagram
     participant Postgres as PostgreSQL DB
     participant Kafka as Kafka (payment-events)
     participant RecWorker as Recovery Consumer
-    participant ML as ML Service (LightGBM)
+    participant ML as ML Service (XGBoost)
     participant A1 as Agent 1 (Analyst)
     participant A2 as Agent 2 (Executor)
     participant Policy as Policy Engine

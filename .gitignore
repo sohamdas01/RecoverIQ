@@ -31,6 +31,7 @@ venv.bak/
 
 # ML Large Model Artifacts & Temp Datasets
 *.joblib
+!ml-service/artifacts/model.joblib
 *.pkl
 ml-service/data/raw/*.csv
 ml-service/data/processed/*.parquet
@@ -54,4 +55,44 @@ ml-service/data/processed/*.parquet
 .DS_Store
 Thumbs.db
 .idea/
+.vscode/
+.history/
 *.sublime-workspace
+*.swp
+*.swo
+*~
+*.tmp
+*.bak
+
+# Test, Coverage & Lint Caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage/
+.nyc_output/
+.eslintcache
+*.tsbuildinfo
+
+# Python Packaging Artifacts
+*.egg-info/
+pip-log.txt
+
+# Local Docker Overrides & Persistent Service Data
+docker-compose.override.yml
+postgres_data/
+redis_data/
+qdrant_data/
+qdrant_storage/
+minio_data/
+redpanda_data/
+
+# Packaged / Deploy Tool Output
+*.tgz
+.vercel/
+
+# Local AI Assistant Settings
+.claude/
+CLAUDE.local.md

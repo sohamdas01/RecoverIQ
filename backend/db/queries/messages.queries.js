@@ -19,3 +19,11 @@ export async function getMessagesByTransactionId(transactionId) {
     .where(eq(messages.transactionId, transactionId))
     .orderBy(desc(messages.createdAt));
 }
+
+export async function getRecentMessages(limit = 50) {
+  return db
+    .select()
+    .from(messages)
+    .orderBy(desc(messages.createdAt))
+    .limit(limit);
+}

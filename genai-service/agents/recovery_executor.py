@@ -170,7 +170,8 @@ class RecoveryExecutorAgent:
             }
 
         # Safety Check 3: Check if Agent 1 recommendation is supported
-        if rec not in inp.availableActions:
+        valid_actions = set(RecoveryActionEnum) | {e.value for e in RecoveryActionEnum}
+        if rec not in valid_actions:
             return {
                 "proposedAction": RecoveryActionEnum.ESCALATE_TO_HUMAN.value,
                 "confidence": 0.40,
