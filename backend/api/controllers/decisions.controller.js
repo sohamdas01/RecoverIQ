@@ -1,15 +1,17 @@
 import { getRecentDecisions, getDecisionById, getPendingReviewDecisions } from '../../db/queries/decisions.queries.js';
 import { ReviewService } from '../../services/review/index.js';
 import { ObservabilityService } from '../../services/observability/index.js';
+import { parseLimit, merchantScope } from '../utils/http.js';
 
 export async function listDecisions(req, res, next) {
   try {
-    const limit = parseInt(req.query.limit || '50', 10);
+    const limit = parseLimit(req.query.limit);
     const pendingOnly = req.query.pending === 'true';
+    const scope = merchantScope(req);
 
     const decisions = pendingOnly
-      ? await getPendingReviewDecisions()
-      : await getRecentDecisions(limit);
+      ? await getPendingReviewDecisions(scope)
+      : await getRecentDecisions(limit, scope);
 
     return res.status(200).json({
       success: true,
@@ -23,8 +25,8 @@ export async function listDecisions(req, res, next) {
 
 export async function listActivity(req, res, next) {
   try {
-    const limit = parseInt(req.query.limit || '50', 10);
-    const activity = await ObservabilityService.getRecentActivity(limit);
+    const limit = parseLimit(req.query.limit);
+    const activity = await ObservabilityService.getRecentActivity(limit, merchantScope(req));
 
     return res.status(200).json({
       success: true,
@@ -39,7 +41,8 @@ export async function listActivity(req, res, next) {
 export async function getDecision(req, res, next) {
   try {
     const { id } = req.params;
-    const decision = await getDecisionById(id);
+    // Another merchant's case id reads as "not found" (no existence leak)
+    const decision = await getDecisionById(id, merchantScope(req));
     if (!decision) {
       return res.status(404).json({ success: false, message: 'Decision not found' });
     }
@@ -52,17 +55,20 @@ export async function getDecision(req, res, next) {
 /**
  * Human-in-the-loop Review: Approve, Modify, or Reject a queued decision
  * Delegates to centralized ReviewService for Policy re-evaluation and safe Execution Gate.
+ * Requires reviewer/admin role; the case must belong to the caller's merchant.
  */
 export async function reviewDecision(req, res, next) {
   try {
     const { id } = req.params;
-    const { reviewAction, modifiedAction, modifiedParams, merchantReasoning } = req.body;
-    const reviewerId = req.merchant?.merchantId || req.merchant?.userId || 'merchant_admin';
+    const { reviewAction, modifiedAction, modifiedParams, merchantReasoning } = req.body || {};
+    const reviewerId = req.merchant.userId;
+    const scope = merchantScope(req);
 
     if (reviewAction === 'reject') {
       const result = await ReviewService.rejectCase(id, {
         reviewerId,
         reasoning: merchantReasoning || 'Rejected by merchant',
+        ...scope,
       });
       return res.status(200).json(result);
     }
@@ -73,6 +79,7 @@ export async function reviewDecision(req, res, next) {
         modifiedAction,
         modifiedParams,
         reasoning: merchantReasoning || 'Modified parameters by merchant',
+        ...scope,
       });
       return res.status(200).json(result);
     }
@@ -81,6 +88,7 @@ export async function reviewDecision(req, res, next) {
     const result = await ReviewService.approveCase(id, {
       reviewerId,
       reasoning: merchantReasoning || 'Approved by merchant',
+      ...scope,
     });
     return res.status(200).json(result);
   } catch (error) {

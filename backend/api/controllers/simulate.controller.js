@@ -13,6 +13,7 @@ export async function simulatePurchaseFailure(req, res, next) {
     } = req.body || {};
 
     const event = {
+      merchantId: req.merchant.merchantId, // simulated events belong to the authenticated merchant
       eventId: `sim_${Date.now()}`,
       customer: {
         name: customerName,
@@ -87,6 +88,7 @@ export async function simulateBatchFailures(req, res, next) {
     const results = [];
     for (const item of scenarios) {
       const event = {
+        merchantId: req.merchant.merchantId,
         eventId: `batch_${Date.now()}_${Math.random().toString(36).substring(7)}`,
         customer: { name: item.customerName, email: item.customerEmail },
         amount: item.amount,

@@ -23,7 +23,7 @@ import assert from 'node:assert';
 import crypto from 'crypto';
 import express from 'express';
 import axios from 'axios';
-import { AuthService } from '../services/auth/auth.service.js';
+import { createDefaultMerchantUser } from './helpers/auth-fixtures.js';
 import { RecoveryAnalystClient } from '../services/agents/recovery-analyst.client.js';
 import { RecoveryExecutorClient } from '../services/agents/recovery-executor.client.js';
 import { evaluatePolicy, POLICY_DECISIONS, RULE_IDS, SUPPORTED_ACTIONS } from '../services/policy/index.js';
@@ -62,8 +62,8 @@ describe('Phase 5 - Step 7: Comprehensive Agentic Safety & Evaluation Tests', ()
       });
     });
 
-    merchantToken = AuthService.generateMerchantToken('merchant_safety_123', 'merchant');
-    adminToken = AuthService.generateMerchantToken('admin_safety_999', 'admin');
+    merchantToken = (await createDefaultMerchantUser('reviewer')).token;
+    adminToken = (await createDefaultMerchantUser('admin')).token;
   });
 
   after(async () => {
@@ -583,7 +583,7 @@ describe('Phase 5 - Step 7: Comprehensive Agentic Safety & Evaluation Tests', ()
       });
 
       assert.ok(result.decision);
-      const explanation = await ObservabilityService.getDecisionExplanation(result.decision.id);
+      const explanation = await ObservabilityService.getDecisionExplanation(result.decision.id, { system: true });
       assert.strictEqual(explanation.isReplay, true);
       assert.strictEqual(explanation.lineage.originalEventId, originalEventId);
       assert.strictEqual(explanation.lineage.replayEventId, replayEventId);

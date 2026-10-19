@@ -16,7 +16,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import express from 'express';
 import axios from 'axios';
-import { AuthService } from '../services/auth/auth.service.js';
+import { createDefaultMerchantUser } from './helpers/auth-fixtures.js';
 import { AskRecoverIQService } from '../services/ask/ask.service.js';
 import { closeDatabasePool } from '../db/index.js';
 import { disconnectRedis } from '../redis/redis.client.js';
@@ -43,7 +43,7 @@ describe('Phase 7 - Step 6: Ask RecoverIQ Grounded Explainer Tests', () => {
       });
     });
 
-    merchantToken = AuthService.generateMerchantToken('merchant_test_admin', 'admin');
+    merchantToken = (await createDefaultMerchantUser('admin')).token;
   });
 
   after(async () => {
@@ -117,7 +117,7 @@ describe('Phase 7 - Step 6: Ask RecoverIQ Grounded Explainer Tests', () => {
   });
 
   it('6. AskRecoverIQService handles empty evidence gracefully', async () => {
-    const res = await AskRecoverIQService.ask({
+    const res = await AskRecoverIQService.ask({ system: true,
       question: 'Why was case-not-found blocked?',
       caseId: 'case-not-found-999',
     });

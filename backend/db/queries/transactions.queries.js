@@ -1,9 +1,10 @@
 import { db } from '../index.js';
-import { transactions, customers } from '../../../drizzle/schema.js';
-import { eq, desc } from 'drizzle-orm';
+import { transactions, customers, DEFAULT_MERCHANT_ID } from '../../../drizzle/schema.js';
+import { and, eq, desc } from 'drizzle-orm';
 
 export async function createTransaction(data) {
   const [tx] = await db.insert(transactions).values({
+    merchantId: data.merchantId || DEFAULT_MERCHANT_ID,
     customerId: data.customerId,
     amount: Number(data.amount).toFixed(2),
     currency: data.currency || 'INR',
@@ -16,7 +17,12 @@ export async function createTransaction(data) {
   return tx;
 }
 
-export async function getTransactionById(id) {
+/**
+ * @param {string} id
+ * @param {{ merchantId?: string }} [scope] When merchantId is given, only that merchant's
+ *   transaction is visible (other tenants' rows read as "not found"). Omit for internal use.
+ */
+export async function getTransactionById(id, { merchantId } = {}) {
   const [tx] = await db
     .select({
       transaction: transactions,
@@ -24,7 +30,11 @@ export async function getTransactionById(id) {
     })
     .from(transactions)
     .innerJoin(customers, eq(transactions.customerId, customers.id))
-    .where(eq(transactions.id, id))
+    .where(
+      merchantId
+        ? and(eq(transactions.id, id), eq(transactions.merchantId, merchantId))
+        : eq(transactions.id, id)
+    )
     .limit(1);
   return tx || null;
 }
@@ -57,14 +67,16 @@ export async function updateTransaction(id, updates) {
   return updated;
 }
 
-export async function getRecentTransactions(limit = 50) {
-  return db
+export async function getRecentTransactions(limit = 50, { merchantId } = {}) {
+  const query = db
     .select({
       transaction: transactions,
       customer: customers,
     })
     .from(transactions)
-    .innerJoin(customers, eq(transactions.customerId, customers.id))
+    .innerJoin(customers, eq(transactions.customerId, customers.id));
+
+  return (merchantId ? query.where(eq(transactions.merchantId, merchantId)) : query)
     .orderBy(desc(transactions.createdAt))
     .limit(limit);
 }

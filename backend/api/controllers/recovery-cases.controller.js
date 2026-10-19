@@ -2,11 +2,26 @@
  * RecoverIQ Recovery Cases Admin Review Controller
  * Phase 5 - Step 5: Human-in-the-Loop Approval Workflow
  * Phase 7 - Step 3: Live Recovery Activity Feed
+ *
+ * Every handler runs behind requireMerchantAuth and acts only on the caller's merchant:
+ * the tenant comes from the authenticated principal (req.merchant), never from the request.
  */
 
 import { ReviewService } from '../../services/review/index.js';
 import { ObservabilityService } from '../../services/observability/index.js';
 import { AskRecoverIQService } from '../../services/ask/ask.service.js';
+import { parseLimit, merchantScope } from '../utils/http.js';
+
+function sendServiceError(error, res, next) {
+  if (error.statusCode) {
+    return res.status(error.statusCode).json({
+      success: false,
+      code: error.code,
+      message: error.message,
+    });
+  }
+  return next(error);
+}
 
 /**
  * GET /api/admin/recovery-cases/activity
@@ -14,8 +29,8 @@ import { AskRecoverIQService } from '../../services/ask/ask.service.js';
  */
 export async function getRecoveryActivity(req, res, next) {
   try {
-    const limit = parseInt(req.query.limit || '50', 10);
-    const activity = await ObservabilityService.getRecentActivity(limit);
+    const limit = parseLimit(req.query.limit);
+    const activity = await ObservabilityService.getRecentActivity(limit, merchantScope(req));
 
     return res.status(200).json({
       success: true,
@@ -33,7 +48,7 @@ export async function getRecoveryActivity(req, res, next) {
 export async function getCaseReview(req, res, next) {
   try {
     const { caseId } = req.params;
-    const reviewData = await ReviewService.getCaseForReview(caseId);
+    const reviewData = await ReviewService.getCaseForReview(caseId, merchantScope(req));
 
     if (!reviewData) {
       return res.status(404).json({
@@ -58,7 +73,7 @@ export async function getCaseReview(req, res, next) {
 export async function getCaseExplanation(req, res, next) {
   try {
     const { caseId } = req.params;
-    const explanation = await ObservabilityService.getDecisionExplanation(caseId);
+    const explanation = await ObservabilityService.getDecisionExplanation(caseId, merchantScope(req));
 
     if (!explanation) {
       return res.status(404).json({
@@ -83,23 +98,16 @@ export async function approveRecoveryCase(req, res, next) {
   try {
     const { caseId } = req.params;
     const { reasoning } = req.body || {};
-    const reviewerId = req.merchant?.merchantId || req.merchant?.userId || 'merchant_admin';
 
     const result = await ReviewService.approveCase(caseId, {
-      reviewerId,
+      reviewerId: req.merchant.userId,
       reasoning: reasoning || 'Approved by merchant reviewer',
+      ...merchantScope(req),
     });
 
     return res.status(200).json(result);
   } catch (error) {
-    if (error.statusCode) {
-      return res.status(error.statusCode).json({
-        success: false,
-        code: error.code,
-        message: error.message,
-      });
-    }
-    next(error);
+    return sendServiceError(error, res, next);
   }
 }
 
@@ -110,25 +118,18 @@ export async function modifyRecoveryCase(req, res, next) {
   try {
     const { caseId } = req.params;
     const { modifiedAction, modifiedParams, reasoning } = req.body || {};
-    const reviewerId = req.merchant?.merchantId || req.merchant?.userId || 'merchant_admin';
 
     const result = await ReviewService.modifyCase(caseId, {
-      reviewerId,
+      reviewerId: req.merchant.userId,
       modifiedAction,
       modifiedParams,
       reasoning: reasoning || 'Modified parameters and approved by merchant reviewer',
+      ...merchantScope(req),
     });
 
     return res.status(200).json(result);
   } catch (error) {
-    if (error.statusCode) {
-      return res.status(error.statusCode).json({
-        success: false,
-        code: error.code,
-        message: error.message,
-      });
-    }
-    next(error);
+    return sendServiceError(error, res, next);
   }
 }
 
@@ -139,23 +140,16 @@ export async function rejectRecoveryCase(req, res, next) {
   try {
     const { caseId } = req.params;
     const { reasoning } = req.body || {};
-    const reviewerId = req.merchant?.merchantId || req.merchant?.userId || 'merchant_admin';
 
     const result = await ReviewService.rejectCase(caseId, {
-      reviewerId,
+      reviewerId: req.merchant.userId,
       reasoning: reasoning || 'Rejected by merchant reviewer',
+      ...merchantScope(req),
     });
 
     return res.status(200).json(result);
   } catch (error) {
-    if (error.statusCode) {
-      return res.status(error.statusCode).json({
-        success: false,
-        code: error.code,
-        message: error.message,
-      });
-    }
-    next(error);
+    return sendServiceError(error, res, next);
   }
 }
 
@@ -176,6 +170,7 @@ export async function askRecoverIQ(req, res, next) {
     const result = await AskRecoverIQService.ask({
       question: question.trim(),
       caseId: caseId ? String(caseId).trim() : undefined,
+      ...merchantScope(req),
     });
 
     return res.status(200).json({

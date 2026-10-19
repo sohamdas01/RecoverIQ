@@ -8,7 +8,8 @@ export async function replayDlqEventHandler(req, res) {
   try {
     const { dlqEventId } = req.params;
     const { dryRun, force } = req.body || {};
-    const replayedBy = req.merchant?.merchantId || req.merchant?.email || req.body?.replayedBy || 'admin';
+    // Identity comes from the authenticated principal only; a client-supplied `replayedBy` is ignored
+    const replayedBy = req.merchant.email || req.merchant.userId;
 
     const result = await replayDlqEvent(dlqEventId, {
       replayedBy,

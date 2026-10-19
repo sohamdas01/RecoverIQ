@@ -2,7 +2,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'crypto';
 import { db, closeDatabasePool } from '../db/index.js';
-import { customers, transactions, decisions } from '../../drizzle/schema.js';
+import { customers, transactions, decisions, DEFAULT_MERCHANT_ID } from '../../drizzle/schema.js';
 import { eq } from 'drizzle-orm';
 import { disconnectRedis } from '../redis/redis.client.js';
 import {
@@ -299,6 +299,7 @@ describe('Step 6: Retry Handling & Dead-Letter Queue (DLQ) Tests', () => {
       const [customer] = await db
         .insert(customers)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           name: 'DLQ Success User',
           email: testEmail,
           phone: '+919876543210',
@@ -308,6 +309,7 @@ describe('Step 6: Retry Handling & Dead-Letter Queue (DLQ) Tests', () => {
       const [tx] = await db
         .insert(transactions)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           customerId: customer.id,
           amount: '1499.00',
           currency: 'INR',
@@ -435,6 +437,7 @@ describe('Step 6: Retry Handling & Dead-Letter Queue (DLQ) Tests', () => {
       const [customer] = await db
         .insert(customers)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           name: 'Outcome DLQ Test',
           email: `outcome.dlq.${Date.now()}@example.com`,
           phone: '+919876543211',
@@ -444,6 +447,7 @@ describe('Step 6: Retry Handling & Dead-Letter Queue (DLQ) Tests', () => {
       const [tx] = await db
         .insert(transactions)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           customerId: customer.id,
           amount: '3500.00',
           currency: 'INR',

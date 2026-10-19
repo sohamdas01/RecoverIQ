@@ -12,6 +12,7 @@ import { getActionsByDecisionId } from '../../db/queries/actions.queries.js';
 import { getOverridesByDecisionId } from '../../db/queries/overrides.queries.js';
 import { createMessage, getMessagesByTransactionId, getRecentMessages } from '../../db/queries/messages.queries.js';
 import { logger } from '../logger/index.js';
+import { resolveScope } from '../auth/tenant-scope.js';
 
 export const AUDIT_EVENT_TYPES = {
   RECOVERY_RECEIVED: 'recovery_received',
@@ -123,13 +124,14 @@ export class ObservabilityService {
    * - timestamp (ISO string)
    * - summary (human-readable title/description)
    */
-  static async getRecentActivity(limit = 50) {
+  static async getRecentActivity(limit = 50, { merchantId, system } = {}) {
+    const scope = resolveScope({ merchantId, system });
     const rawLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
 
     // 1. Fetch recent messages & recent decisions
     const [recentMsgs, recentDecisions] = await Promise.all([
-      getRecentMessages(rawLimit * 2).catch(() => []),
-      getRecentDecisions(rawLimit).catch(() => []),
+      getRecentMessages(rawLimit * 2, scope).catch(() => []),
+      getRecentDecisions(rawLimit, scope).catch(() => []),
     ]);
 
     // Build map of decisions for fast metadata enrichment
@@ -343,9 +345,10 @@ export class ObservabilityService {
   /**
    * Get recent decisions with safe error handling
    */
-  static async getRecentDecisions(limit = 50) {
+  static async getRecentDecisions(limit = 50, { merchantId, system } = {}) {
+    const scope = resolveScope({ merchantId, system });
     try {
-      return await getRecentDecisions(limit);
+      return await getRecentDecisions(limit, scope);
     } catch (err) {
       return [];
     }
@@ -358,9 +361,10 @@ export class ObservabilityService {
    * @param {string} caseId Decision ID
    * @returns {Promise<Object|null>} Complete decision lineage and evidence explanation
    */
-  static async getDecisionExplanation(caseId) {
+  static async getDecisionExplanation(caseId, { merchantId, system } = {}) {
+    const scope = resolveScope({ merchantId, system });
     try {
-      const record = await getDecisionById(caseId);
+      const record = await getDecisionById(caseId, scope);
       if (!record) return null;
 
       const { decision, transaction, customer } = record;

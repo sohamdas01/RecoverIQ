@@ -2,54 +2,145 @@ const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:400
 
 /**
  * Merchant Authentication State Management
+ *
+ * The session is a bearer token issued by POST /auth/login. It is kept in localStorage so a
+ * dashboard session survives reloads; the backend re-validates it (and the user's role) on
+ * every request, so nothing stored here is trusted for authorization.
  */
+const TOKEN_KEY = 'recoveriq_merchant_token';
+const USER_KEY = 'recoveriq_merchant_user';
+
 let memoryToken = null;
+let memoryUser = null;
+
+export class AuthError extends Error {
+  constructor(message, code) {
+    super(message);
+    this.name = 'AuthError';
+    this.code = code;
+  }
+}
 
 export function getAuthToken() {
   if (typeof window !== 'undefined') {
-    return localStorage.getItem('recoveriq_merchant_token') || memoryToken;
+    try {
+      return localStorage.getItem(TOKEN_KEY) || memoryToken;
+    } catch {
+      return memoryToken;
+    }
   }
   return memoryToken;
 }
 
 export function setAuthToken(token) {
   memoryToken = token;
-  if (typeof window !== 'undefined' && token) {
-    localStorage.setItem('recoveriq_merchant_token', token);
-  } else if (typeof window !== 'undefined' && !token) {
-    localStorage.removeItem('recoveriq_merchant_token');
+  if (typeof window === 'undefined') return;
+  try {
+    if (token) {
+      localStorage.setItem(TOKEN_KEY, token);
+    } else {
+      localStorage.removeItem(TOKEN_KEY);
+    }
+  } catch {
+    // storage unavailable (private mode): keep the in-memory token only
   }
 }
 
-export async function ensureAuthToken(merchantId = 'merchant_admin') {
-  let token = getAuthToken();
-  if (token) return token;
+export function getStoredUser() {
+  if (typeof window !== 'undefined') {
+    try {
+      const raw = localStorage.getItem(USER_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch {
+      // fall through to memory
+    }
+  }
+  return memoryUser;
+}
 
+function setStoredUser(user) {
+  memoryUser = user;
+  if (typeof window === 'undefined') return;
   try {
-    const res = await fetch(`${BACKEND_URL}/admin/recovery-cases/auth/token`, {
+    if (user) {
+      localStorage.setItem(USER_KEY, JSON.stringify(user));
+    } else {
+      localStorage.removeItem(USER_KEY);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+export function clearSession() {
+  setAuthToken(null);
+  setStoredUser(null);
+}
+
+/**
+ * Sign in with email + password. Resolves with the user profile; throws AuthError on failure.
+ */
+export async function login(email, password) {
+  let res;
+  try {
+    res = await fetch(`${BACKEND_URL}/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ merchantId, role: 'admin' }),
+      body: JSON.stringify({ email, password }),
+      cache: 'no-store',
     });
-    if (res.ok) {
-      const data = await res.json();
-      if (data.token) {
-        setAuthToken(data.token);
-        return data.token;
-      }
-    }
-  } catch (err) {
-    console.warn('[API] Could not auto-generate merchant token:', err.message);
+  } catch {
+    throw new AuthError('Could not reach the server. Please try again.', 'NETWORK_ERROR');
   }
-  return null;
+
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || !body.token) {
+    throw new AuthError(body.message || 'Sign in failed. Please try again.', body.code || 'LOGIN_FAILED');
+  }
+
+  setAuthToken(body.token);
+  setStoredUser(body.user);
+  return body.user;
 }
 
-function getHeaders(customHeaders = {}) {
-  const token = getAuthToken();
+export function logout() {
+  clearSession();
+}
+
+/**
+ * Validate the stored session against the backend and return the current user (fresh role).
+ */
+export async function fetchCurrentUser() {
+  const res = await request('/auth/me');
+  if (!res.ok) throw new Error(`Failed to load session: ${res.statusText}`);
+  const body = await res.json();
+  setStoredUser(body.user);
+  return body.user;
+}
+
+let sessionExpiredHandler = null;
+
+/**
+ * Registered by <AuthProvider>: called when the backend rejects the stored session (401),
+ * so the UI can send the user to /login without this module owning navigation.
+ */
+export function setSessionExpiredHandler(handler) {
+  sessionExpiredHandler = handler;
+}
+
+function handleSessionExpired() {
+  clearSession();
+  if (sessionExpiredHandler) {
+    sessionExpiredHandler();
+  }
+}
+
+function getHeaders({ auth = true, customHeaders = {} } = {}) {
   const headers = {
     'Content-Type': 'application/json',
     ...customHeaders,
   };
+  const token = auth ? getAuthToken() : null;
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
@@ -57,14 +148,44 @@ function getHeaders(customHeaders = {}) {
 }
 
 /**
+ * Central request helper for authenticated backend calls.
+ * A 401 means the session is missing/expired/revoked: clear it and send the user to /login.
+ */
+async function request(path, { method = 'GET', body, auth = true } = {}) {
+  const res = await fetch(`${BACKEND_URL}${path}`, {
+    method,
+    headers: getHeaders({ auth }),
+    body: body === undefined ? undefined : JSON.stringify(body),
+    cache: 'no-store',
+  });
+
+  if (res.status === 401 && auth) {
+    handleSessionExpired();
+    throw new AuthError('Your session has expired. Please sign in again.', 'SESSION_EXPIRED');
+  }
+  return res;
+}
+
+/**
+ * Parse an action (approve / reject / modify / review) response. Failures resolve to
+ * `{ success: false, error }` with the server's message (e.g. "permission denied").
+ */
+async function actionResult(res) {
+  const body = await res.json().catch(() => ({}));
+  if (res.ok) return body;
+  return {
+    success: false,
+    code: body.code,
+    error: body.message || body.error?.message || body.error || res.statusText || 'Request failed',
+  };
+}
+
+/**
  * Dashboard & Cases API Client Methods
  */
 
 export async function fetchTransactions() {
-  const res = await fetch(`${BACKEND_URL}/transactions`, {
-    headers: getHeaders(),
-    cache: 'no-store',
-  });
+  const res = await request('/transactions');
   if (!res.ok) throw new Error(`Failed to fetch transactions: ${res.statusText}`);
   return res.json();
 }
@@ -74,29 +195,20 @@ export async function fetchDecisions(pendingOnly = false, limit = 50) {
   if (pendingOnly) query.set('pending', 'true');
   if (limit) query.set('limit', String(limit));
 
-  const res = await fetch(`${BACKEND_URL}/decisions?${query.toString()}`, {
-    headers: getHeaders(),
-    cache: 'no-store',
-  });
+  const res = await request(`/decisions?${query.toString()}`);
   if (!res.ok) throw new Error(`Failed to fetch decisions: ${res.statusText}`);
   return res.json();
 }
 
 export async function fetchDecisionById(id) {
-  const res = await fetch(`${BACKEND_URL}/decisions/${id}`, {
-    headers: getHeaders(),
-    cache: 'no-store',
-  });
+  const res = await request(`/decisions/${id}`);
   if (!res.ok) throw new Error(`Failed to fetch decision: ${res.statusText}`);
   return res.json();
 }
 
 export async function fetchLiveActivity(limit = 20) {
   const query = new URLSearchParams({ limit: String(limit) });
-  const res = await fetch(`${BACKEND_URL}/decisions/activity?${query.toString()}`, {
-    headers: getHeaders(),
-    cache: 'no-store',
-  });
+  const res = await request(`/decisions/activity?${query.toString()}`);
   if (!res.ok) throw new Error(`Failed to fetch live activity: ${res.statusText}`);
   return res.json();
 }
@@ -104,8 +216,14 @@ export async function fetchLiveActivity(limit = 20) {
 export async function fetchDashboardSummary() {
   // Fetch decisions and transactions concurrently to calculate real metric summary
   const [decisionsRes, transactionsRes] = await Promise.all([
-    fetchDecisions(false, 100).catch(() => ({ success: false, data: [] })),
-    fetchTransactions().catch(() => ({ success: false, data: [] })),
+    fetchDecisions(false, 100).catch((err) => {
+      if (err instanceof AuthError) throw err;
+      return { success: false, data: [] };
+    }),
+    fetchTransactions().catch((err) => {
+      if (err instanceof AuthError) throw err;
+      return { success: false, data: [] };
+    }),
   ]);
 
   const cases = decisionsRes.data || [];
@@ -148,20 +266,24 @@ export async function fetchDashboardSummary() {
 }
 
 export async function fetchCaseExplanation(caseId) {
-  await ensureAuthToken();
+  let explanationRes = null;
   try {
-    const res = await fetch(`${BACKEND_URL}/admin/recovery-cases/${caseId}/explanation`, {
-      headers: getHeaders(),
-      cache: 'no-store',
-    });
-    if (res.ok) {
-      return res.json();
+    explanationRes = await request(`/admin/recovery-cases/${caseId}/explanation`);
+    if (explanationRes.ok) {
+      return explanationRes.json();
     }
   } catch (err) {
+    if (err instanceof AuthError) throw err;
     console.warn('[API] Explanation endpoint unavailable, falling back to decision record:', err.message);
   }
 
-  // Fallback to decision record if admin explanation is unauthenticated or unavailable
+  // Only a server-side/network failure falls back to the decision record. Authorization failures
+  // and "not found" (which also covers another merchant's case) must surface, not be masked.
+  if (explanationRes && explanationRes.status < 500) {
+    const body = await explanationRes.json().catch(() => ({}));
+    throw new Error(body.message || `Recovery case '${caseId}' not found`);
+  }
+
   const decRes = await fetchDecisionById(caseId);
   if (decRes.success && decRes.data) {
     const { decision, transaction, customer } = decRes.data;
@@ -216,77 +338,41 @@ export async function fetchCaseExplanation(caseId) {
 }
 
 export async function reviewDecision(decisionId, payload) {
-  await ensureAuthToken();
-  const res = await fetch(`${BACKEND_URL}/decisions/${decisionId}/review`, {
-    method: 'POST',
-    headers: getHeaders(),
-    body: JSON.stringify(payload),
-  });
-  return res.json();
+  const res = await request(`/decisions/${decisionId}/review`, { method: 'POST', body: payload });
+  return actionResult(res);
 }
 
 export async function approveCase(caseId, reasoning = 'Approved by merchant') {
-  await ensureAuthToken();
-  const res = await fetch(`${BACKEND_URL}/admin/recovery-cases/${caseId}/approve`, {
-    method: 'POST',
-    headers: getHeaders(),
-    body: JSON.stringify({ reasoning }),
-  });
-  if (!res.ok) {
-    // Fallback to decisions review endpoint
-    return reviewDecision(caseId, { reviewAction: 'approve', merchantReasoning: reasoning });
-  }
-  return res.json();
+  const res = await request(`/admin/recovery-cases/${caseId}/approve`, { method: 'POST', body: { reasoning } });
+  return actionResult(res);
 }
 
 export async function rejectCase(caseId, reasoning = 'Rejected by merchant') {
-  await ensureAuthToken();
-  const res = await fetch(`${BACKEND_URL}/admin/recovery-cases/${caseId}/reject`, {
-    method: 'POST',
-    headers: getHeaders(),
-    body: JSON.stringify({ reasoning }),
-  });
-  if (!res.ok) {
-    return reviewDecision(caseId, { reviewAction: 'reject', merchantReasoning: reasoning });
-  }
-  return res.json();
+  const res = await request(`/admin/recovery-cases/${caseId}/reject`, { method: 'POST', body: { reasoning } });
+  return actionResult(res);
 }
 
 export async function modifyCase(caseId, { modifiedAction, modifiedParams, reasoning }) {
-  await ensureAuthToken();
-  const res = await fetch(`${BACKEND_URL}/admin/recovery-cases/${caseId}/modify`, {
+  const res = await request(`/admin/recovery-cases/${caseId}/modify`, {
     method: 'POST',
-    headers: getHeaders(),
-    body: JSON.stringify({ modifiedAction, modifiedParams, reasoning }),
+    body: { modifiedAction, modifiedParams, reasoning },
   });
-  if (!res.ok) {
-    return reviewDecision(caseId, {
-      reviewAction: 'modify',
-      modifiedAction,
-      modifiedParams,
-      merchantReasoning: reasoning,
-    });
-  }
-  return res.json();
+  return actionResult(res);
 }
 
 export async function simulatePurchase(payload) {
-  const res = await fetch(`${BACKEND_URL}/simulate/purchase`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  return res.json();
+  const res = await request('/simulate/purchase', { method: 'POST', body: payload });
+  return actionResult(res);
 }
 
 export async function simulateBatch() {
-  const res = await fetch(`${BACKEND_URL}/simulate/batch`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-  });
-  return res.json();
+  const res = await request('/simulate/batch', { method: 'POST' });
+  return actionResult(res);
 }
 
+/**
+ * Customer recovery portal calls: public by design (authorised by the signed link token).
+ */
 export async function getRecoveryDetails(token) {
   const res = await fetch(`${BACKEND_URL}/recover/${token}`, { cache: 'no-store' });
   return res.json();
@@ -310,28 +396,13 @@ export async function submitRecoveryPayment(token, payload) {
  * @returns {Promise<Object>}
  */
 export async function askRecoverIQ({ question, caseId }) {
-  await ensureAuthToken();
-  try {
-    const res = await fetch(`${BACKEND_URL}/admin/recovery-cases/ask`, {
-      method: 'POST',
-      headers: getHeaders(),
-      body: JSON.stringify({ question, caseId: caseId || undefined }),
-    });
-    if (res.ok) {
-      return res.json();
-    }
-  } catch (err) {
-    console.warn('[API] /admin/recovery-cases/ask failed, trying /admin/ask fallback:', err.message);
-  }
-
-  const fallbackRes = await fetch(`${BACKEND_URL}/admin/ask`, {
+  const res = await request('/admin/recovery-cases/ask', {
     method: 'POST',
-    headers: getHeaders(),
-    body: JSON.stringify({ question, caseId: caseId || undefined }),
+    body: { question, caseId: caseId || undefined },
   });
-  if (!fallbackRes.ok) {
-    const errBody = await fallbackRes.json().catch(() => ({}));
-    throw new Error(errBody.message || `Ask RecoverIQ request failed: ${fallbackRes.statusText}`);
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error(errBody.message || `Ask RecoverIQ request failed: ${res.statusText}`);
   }
-  return fallbackRes.json();
+  return res.json();
 }

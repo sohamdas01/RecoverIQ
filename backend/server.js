@@ -1,59 +1,17 @@
-import express from 'express';
-import cors from 'cors';
 import * as dotenv from 'dotenv';
 import { config, validateProductionConfig } from './services/config/index.js';
-import { errorHandler } from './api/middleware/error.middleware.js';
-import { correlationMiddleware } from './api/middleware/correlation.middleware.js';
-import { metricsMiddleware } from './api/middleware/metrics.middleware.js';
-import { tracingMiddleware } from './api/middleware/tracing.middleware.js';
+import { createApp } from './app.js';
 
 // Validate production secrets configuration if running in production mode
 validateProductionConfig();
 
-
-import simulateRoutes from './api/routes/simulate.routes.js';
-import transactionsRoutes from './api/routes/transactions.routes.js';
-import decisionsRoutes from './api/routes/decisions.routes.js';
-import recoveryRoutes from './api/routes/recovery.routes.js';
-import webhooksRoutes from './api/routes/webhooks.routes.js';
-import adminRoutes from './api/routes/admin-events.routes.js';
-import recoveryCasesRoutes from './api/routes/recovery-cases.routes.js';
-import healthRoutes from './api/routes/health.routes.js';
-import metricsRoutes from './api/routes/metrics.routes.js';
-
-import { checkKafkaHealth, initKafkaTopics, disconnectKafka } from './kafka/kafka.client.js';
+import { initKafkaTopics, disconnectKafka } from './kafka/kafka.client.js';
 import { startRecoveryConsumer, stopRecoveryConsumer } from './kafka/consumers/recovery.consumer.js';
 import { startOutcomeConsumer, stopOutcomeConsumer } from './kafka/consumers/outcome.consumer.js';
 
 dotenv.config();
 
-const app = express();
-
-// Middleware
-app.use(cors({ origin: '*' }));
-app.use(express.json());
-app.use(tracingMiddleware);
-app.use(correlationMiddleware);
-app.use(metricsMiddleware);
-
-
-// Health & Readiness Probes
-app.use('/health', healthRoutes);
-
-// Prometheus Metrics Endpoint
-app.use('/metrics', metricsRoutes);
-
-// API Routes
-app.use('/api/simulate', simulateRoutes);
-app.use('/api/transactions', transactionsRoutes);
-app.use('/api/decisions', decisionsRoutes);
-app.use('/api/recover', recoveryRoutes);
-app.use('/api/webhooks', webhooksRoutes);
-app.use('/api/admin/recovery-cases', recoveryCasesRoutes);
-app.use('/api/admin', adminRoutes);
-
-// Error Handling
-app.use(errorHandler);
+const app = createApp();
 
 const PORT = config.port || 4000;
 

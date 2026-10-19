@@ -9,6 +9,7 @@
 import axios from 'axios';
 import { config } from '../config/index.js';
 import { logger } from '../logger/index.js';
+import { resolveScope } from '../auth/tenant-scope.js';
 import { ObservabilityService } from '../observability/observability.service.js';
 import { withSpan, injectTraceContext } from '../observability/tracing.service.js';
 
@@ -24,7 +25,9 @@ export class AskRecoverIQService {
    * @param {Object} [options]
    * @returns {Promise<{answer: string, evidence: Array, isGrounded: boolean}>}
    */
-  static async ask({ question, caseId }, options = {}) {
+  static async ask({ question, caseId, merchantId, system }, options = {}) {
+    // Every answer is grounded only in the calling merchant's data; refuse to run without a tenant
+    const scope = resolveScope({ merchantId, system });
     if (!question || typeof question !== 'string' || question.trim().length === 0) {
       return {
         answer: 'Please provide a valid question to Ask RecoverIQ.',
@@ -45,7 +48,7 @@ export class AskRecoverIQService {
       },
     }, async (span) => {
       // 1. Gather Grounded Evidence
-      const evidence = await AskRecoverIQService.gatherEvidence({ question: trimmedQuestion, caseId });
+      const evidence = await AskRecoverIQService.gatherEvidence({ question: trimmedQuestion, caseId, merchantId: scope.merchantId, system });
 
       if (evidence.length === 0) {
         return {
@@ -104,13 +107,16 @@ export class AskRecoverIQService {
    * @param {string} [params.caseId]
    * @returns {Promise<Array<Object>>} Structured evidence items
    */
-  static async gatherEvidence({ question, caseId }) {
+  static async gatherEvidence({ question, caseId, merchantId, system }) {
+    const scope = resolveScope({ merchantId, system });
+    // Query-layer services take an explicit tenant (or system) option
+    const obsScope = scope.merchantId ? { merchantId: scope.merchantId } : { system: true };
     try {
       const evidence = [];
 
       if (caseId) {
         // Specific Case Evidence Extraction
-        const explanation = await ObservabilityService.getDecisionExplanation(caseId);
+        const explanation = await ObservabilityService.getDecisionExplanation(caseId, obsScope);
         if (!explanation) {
           return [];
         }
@@ -229,8 +235,8 @@ export class AskRecoverIQService {
 
     } else {
       // Aggregate Telemetry Evidence Extraction
-      const recentActivity = await ObservabilityService.getRecentActivity(20);
-      const recentDecisions = await ObservabilityService.getRecentDecisions(10);
+      const recentActivity = await ObservabilityService.getRecentActivity(20, obsScope);
+      const recentDecisions = await ObservabilityService.getRecentDecisions(10, obsScope);
 
       let totalRecovered = 0;
       let blockedCount = 0;

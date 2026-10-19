@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import Link from 'next/link';
 import { PolicyBadge, ActionBadge } from './StatusBadge';
 import { approveCase, rejectCase } from '@/lib/api';
+import { useAuth } from '@/components/AuthProvider';
 
 export default function PendingReviewQueue({
   cases = [],
@@ -11,6 +12,7 @@ export default function PendingReviewQueue({
   onActionComplete = null,
 }) {
   const [processingId, setProcessingId] = useState(null);
+  const { canReview } = useAuth();
   const [feedback, setFeedback] = useState(null);
 
   // Filter only pending review cases
@@ -189,6 +191,7 @@ export default function PendingReviewQueue({
 
                   <td className="py-3.5 px-4 text-right">
                     <div className="flex items-center justify-end gap-1.5">
+                      {canReview && (<>
                       <button
                         onClick={(e) => handleQuickApprove(e, dec.id)}
                         disabled={isProcessing}
@@ -205,6 +208,7 @@ export default function PendingReviewQueue({
                       >
                         Reject
                       </button>
+                      </>)}
                       <Link
                         href={`/dashboard/cases/${dec.id}`}
                         className="px-2.5 py-1 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition"

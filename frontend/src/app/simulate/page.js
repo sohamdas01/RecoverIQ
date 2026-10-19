@@ -3,8 +3,9 @@
 import React, { useState } from 'react';
 import Link from 'next/link';
 import { simulatePurchase, simulateBatch } from '../../lib/api';
+import AuthGuard from '@/components/AuthGuard';
 
-export default function SimulatePage() {
+function SimulateContent() {
   const [formData, setFormData] = useState({
     customerName: 'Priya Sharma',
     customerEmail: 'priya.sharma@example.com',
@@ -413,5 +414,13 @@ export default function SimulatePage() {
 
       </div>
     </div>
+  );
+}
+
+export default function SimulatePage() {
+  return (
+    <AuthGuard roles={['admin']}>
+      <SimulateContent />
+    </AuthGuard>
   );
 }

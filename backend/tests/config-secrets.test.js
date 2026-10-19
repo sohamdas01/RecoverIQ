@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { config, validateProductionConfig, INSECURE_DEFAULT_SECRETS } from '../services/config/index.js';
+import { config, validateProductionConfig, isSimulationEnabled, INSECURE_DEFAULT_SECRETS } from '../services/config/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -100,11 +100,51 @@ describe('Phase 6 — Step 5: Configuration & Secrets Cleanup Test Suite', () =>
         DATABASE_URL: 'postgresql://prod_user:StrongProdPassword2026!@prod-db.internal:5432/recoveriq_prod',
         ML_INTERNAL_TOKEN: 'sec_ml_prod_8f3a9b1c7d2e4f5a6b0c',
         GENAI_INTERNAL_TOKEN: 'sec_genai_prod_1e2d3c4b5a6f7e8d',
+        FRONTEND_URL: 'https://app.recoveriq.example',
       };
 
       const result = validateProductionConfig(prodEnvValid);
       assert.strictEqual(result.isValid, true);
       assert.strictEqual(result.errors.length, 0);
+    });
+
+    const strongProdEnv = () => ({
+      NODE_ENV: 'production',
+      JWT_SECRET: 'k8F9w2N#zL5v$P1qR7tY3mC0xJ6uE4bA',
+      RECOVERY_LINK_SECRET: 'v2N#zL5v$P1qR7tY3mC0xJ6uE4bAk8F9',
+      DATABASE_URL: 'postgresql://prod_user:StrongProdPassword2026!@prod-db.internal:5432/recoveriq_prod',
+      ML_INTERNAL_TOKEN: 'sec_ml_prod_8f3a9b1c7d2e4f5a6b0c',
+      GENAI_INTERNAL_TOKEN: 'sec_genai_prod_1e2d3c4b5a6f7e8d',
+      FRONTEND_URL: 'https://app.recoveriq.example',
+    });
+
+    test('2.5 Production mode rejects a JWT secret shorter than 32 characters', () => {
+      const env = { ...strongProdEnv(), JWT_SECRET: 'short-but-unique-secret' };
+      assert.throws(
+        () => validateProductionConfig(env),
+        (err) => err.validationErrors.some((e) => e.includes('JWT_SECRET') && e.includes('too short'))
+      );
+    });
+
+    test('2.6 Production mode requires an explicit browser origin and rejects wildcard CORS', () => {
+      const missing = strongProdEnv();
+      delete missing.FRONTEND_URL;
+      assert.throws(
+        () => validateProductionConfig(missing),
+        (err) => err.validationErrors.some((e) => e.includes('CORS_ORIGINS'))
+      );
+
+      assert.throws(
+        () => validateProductionConfig({ ...strongProdEnv(), CORS_ORIGINS: '*' }),
+        (err) => err.validationErrors.some((e) => e.includes("must not contain '*'"))
+      );
+    });
+
+    test('2.7 Simulation is on by default in development and off by default in production', () => {
+      assert.strictEqual(isSimulationEnabled({ NODE_ENV: 'development' }), true);
+      assert.strictEqual(isSimulationEnabled({ NODE_ENV: 'production' }), false);
+      assert.strictEqual(isSimulationEnabled({ NODE_ENV: 'production', ENABLE_SIMULATION: 'true' }), true);
+      assert.strictEqual(isSimulationEnabled({ NODE_ENV: 'development', ENABLE_SIMULATION: 'false' }), false);
     });
   });
 

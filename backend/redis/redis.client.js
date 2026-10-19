@@ -96,6 +96,33 @@ export async function checkRateLimit(key, maxAttempts = 1, windowSeconds = 3600)
 }
 
 /**
+ * Current attempt count for a rate-limit key without consuming an attempt.
+ */
+export async function peekRateLimit(key, windowSeconds = 3600) {
+  try {
+    if (isConnected) {
+      const current = await redis.get(key);
+      return current ? parseInt(current, 10) || 0 : 0;
+    }
+  } catch (e) {}
+
+  const windowStart = Date.now() - windowSeconds * 1000;
+  return (memoryRateLimits.get(key) || []).filter(t => t > windowStart).length;
+}
+
+/**
+ * Reset a rate-limit key (e.g. after a successful login).
+ */
+export async function clearRateLimit(key) {
+  try {
+    if (isConnected) {
+      await redis.del(key);
+    }
+  } catch (e) {}
+  memoryRateLimits.delete(key);
+}
+
+/**
  * Check and set idempotency key (returns true if first time, false if duplicate)
  */
 export async function checkIdempotency(key, ttlSeconds = 86400) {

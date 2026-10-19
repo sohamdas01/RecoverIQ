@@ -2,11 +2,13 @@
 
 import React, { useState } from 'react';
 import Sidebar from '@/components/Sidebar';
+import AuthGuard from '@/components/AuthGuard';
 
 export default function DashboardLayout({ children }) {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   return (
+    <AuthGuard>
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans flex">
       {/* Sidebar Navigation */}
       <Sidebar
@@ -21,5 +23,6 @@ export default function DashboardLayout({ children }) {
         </main>
       </div>
     </div>
+    </AuthGuard>
   );
 }

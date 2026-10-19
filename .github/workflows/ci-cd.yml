@@ -14,6 +14,31 @@ jobs:
     name: Test & Build Services
     runs-on: ubuntu-latest
 
+    # Backend auth / tenant-isolation tests run against real infrastructure
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: recoveriq_ci
+          POSTGRES_PASSWORD: recoveriq_ci_password
+          POSTGRES_DB: recoveriq_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U recoveriq_ci -d recoveriq_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - name: Checkout Codebase
         uses: actions/checkout@v4
@@ -35,16 +60,49 @@ jobs:
         working-directory: ./backend
         run: npm ci
 
+      - name: Apply Database Migrations
+        env:
+          PGPASSWORD: recoveriq_ci_password
+        run: |
+          for f in drizzle/migrations/*.sql; do
+            echo "Applying $f"
+            psql -h localhost -U recoveriq_ci -d recoveriq_ci -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+
+      - name: Start Redpanda (Kafka)
+        run: |
+          docker run -d --name redpanda -p 19092:19092 \
+            docker.redpanda.com/redpandadata/redpanda:v24.1.8 \
+            redpanda start --smp 1 --memory 512M --overprovisioned \
+            --kafka-addr 0.0.0.0:19092 --advertise-kafka-addr localhost:19092
+          for i in $(seq 1 40); do
+            if docker exec redpanda rpk cluster health 2>/dev/null | grep -qE 'Healthy:\s+true'; then
+              echo "Redpanda is healthy"; exit 0
+            fi
+            sleep 3
+          done
+          echo "Redpanda did not become healthy"; docker logs redpanda | tail -30; exit 1
+
       - name: Run Backend Tests
         working-directory: ./backend
         env:
           NODE_ENV: test
+          DATABASE_URL: postgresql://recoveriq_ci:recoveriq_ci_password@localhost:5432/recoveriq_ci
+          REDIS_URL: redis://localhost:6379
+          KAFKA_BROKERS: localhost:19092
           JWT_SECRET: test-jwt-secret-key-32-chars-long-abc
           RECOVERY_LINK_SECRET: test-recovery-link-secret-32-chars-long
           INTERNAL_SERVICE_TOKEN: test-internal-service-token-32-chars
           GENAI_INTERNAL_TOKEN: test-internal-service-token-32-chars
           ML_INTERNAL_TOKEN: test-internal-service-token-32-chars
-        run: node --test tests/ask-recoveriq.test.js tests/activity-feed.test.js
+        run: >-
+          node --test
+          tests/config-secrets.test.js
+          tests/merchant-auth-security.test.js
+          tests/tenant-isolation.test.js
+          tests/webhook-security.test.js
+          tests/ask-recoveriq.test.js
+          tests/activity-feed.test.js
 
       # ML Service Tests
       - name: Install ML Service Dependencies
@@ -72,6 +130,14 @@ jobs:
       - name: Install Frontend Dependencies
         working-directory: ./frontend
         run: npm ci
+
+      - name: Lint Frontend
+        working-directory: ./frontend
+        run: npm run lint
+
+      - name: Run Frontend Unit Tests
+        working-directory: ./frontend
+        run: npm test
 
       - name: Build Next.js Frontend
         working-directory: ./frontend

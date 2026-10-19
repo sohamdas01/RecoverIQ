@@ -2,12 +2,11 @@
  * RecoverIQ Recovery Cases Admin Review Routes
  * Phase 5 - Step 5: Human-in-the-Loop Approval Workflow
  * Phase 7 - Step 3: Live Recovery Activity
+ * Phase 8: merchant authentication + role-based authorization
  */
 
 import { Router } from 'express';
-import { requireMerchantAuth } from '../middleware/auth.middleware.js';
-import { AuthService } from '../../services/auth/auth.service.js';
-import { config } from '../../services/config/index.js';
+import { requireMerchantAuth, requireRole, ROLE_GROUPS } from '../middleware/auth.middleware.js';
 import {
   getRecoveryActivity,
   getCaseReview,
@@ -20,39 +19,30 @@ import {
 
 const router = Router();
 
-// Dev-only, unauthenticated token generation for the local dashboard session.
-// Disabled in production: it lets any caller mint an admin JWT.
-router.post('/auth/token', (req, res) => {
-  if (config.env === 'production') {
-    return res.status(404).json({ success: false, message: 'Not found' });
-  }
-  const { merchantId = 'merchant_admin', role = 'admin' } = req.body || {};
-  const token = AuthService.generateMerchantToken(merchantId, role);
-  return res.status(200).json({ success: true, token, merchantId, role });
-});
-
-// All review & explainer endpoints require authenticated merchant access
+// All review & explainer endpoints require an authenticated merchant user.
+// (The former unauthenticated dev token endpoint was removed: use POST /api/auth/login.)
 router.use(requireMerchantAuth);
 
 // POST /api/admin/recovery-cases/ask
-router.post('/ask', askRecoverIQ);
+router.post('/ask', requireRole(...ROLE_GROUPS.READ), askRecoverIQ);
 
 // GET /api/admin/recovery-cases/activity
-router.get('/activity', getRecoveryActivity);
+router.get('/activity', requireRole(...ROLE_GROUPS.READ), getRecoveryActivity);
 
 // GET /api/admin/recovery-cases/:caseId/review
-router.get('/:caseId/review', getCaseReview);
+router.get('/:caseId/review', requireRole(...ROLE_GROUPS.READ), getCaseReview);
 
 // GET /api/admin/recovery-cases/:caseId/explanation
-router.get('/:caseId/explanation', getCaseExplanation);
+router.get('/:caseId/explanation', requireRole(...ROLE_GROUPS.READ), getCaseExplanation);
 
+// Human-in-the-loop actions require reviewer/admin
 // POST /api/admin/recovery-cases/:caseId/approve
-router.post('/:caseId/approve', approveRecoveryCase);
+router.post('/:caseId/approve', requireRole(...ROLE_GROUPS.REVIEW), approveRecoveryCase);
 
 // POST /api/admin/recovery-cases/:caseId/modify
-router.post('/:caseId/modify', modifyRecoveryCase);
+router.post('/:caseId/modify', requireRole(...ROLE_GROUPS.REVIEW), modifyRecoveryCase);
 
 // POST /api/admin/recovery-cases/:caseId/reject
-router.post('/:caseId/reject', rejectRecoveryCase);
+router.post('/:caseId/reject', requireRole(...ROLE_GROUPS.REVIEW), rejectRecoveryCase);
 
 export default router;

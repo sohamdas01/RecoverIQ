@@ -179,8 +179,20 @@ curl -X POST http://localhost:4000/api/admin/events/<dlqEventId>/replay \
 
 - **Backend Authority**: Machine learning models and AI agents provide diagnostic recommendations only. The backend policy engine owns all execution authority and security guardrails.
 - **Zero Frontend Direct Model Access**: The Next.js frontend never calls internal ML or GenAI services directly; all requests flow through authenticated backend endpoints.
-- **Admin Replay Protection**: DLQ inspection and replay endpoints require valid JWT authentication via `requireMerchantAuth`.
+- **Merchant Authentication & Tenant Isolation (Phase 8)**: every dashboard API requires a signed-in merchant user, is role-checked, and is scoped to that user's merchant (see below).
+- **Platform-only DLQ Operations**: DLQ inspection and replay require the `platform_admin` operator role; merchant users cannot reach them.
 - **Environment Isolation**: Secrets, credentials, and API keys are strictly loaded via `.env` and `backend/services/config/index.js`.
+
+### Merchant Authentication, Roles & Tenancy (Phase 8)
+
+- **Sign in**: `POST /api/auth/login` with `{ email, password }` returns a short-lived bearer token (default 8h). Passwords are stored as salted scrypt hashes; failed logins are throttled per email and per IP; error messages never reveal whether an account exists. `GET /api/auth/me` returns the current user.
+- **Every request is re-checked against the database**: role, user status and merchant status are read from Postgres on each call, so disabling a user or suspending a merchant takes effect immediately (the token only proves identity). If that lookup fails, access is denied (HTTP 503).
+- **Roles** (per merchant): `viewer` (read dashboard, cases, activity, Ask) → `reviewer` (+ approve / modify / reject cases) → `admin` (+ purchase-failure simulation). `platform_admin` is an operator role used only for the DLQ endpoints and has no implicit access to merchant data.
+- **Tenant isolation**: `customers` and `transactions` carry a `merchant_id`; decisions, actions, messages and overrides inherit it through their transaction. All merchant-facing queries are filtered by the authenticated user's merchant, another merchant's ids read as `404`, and the same customer email under two merchants is two separate customers. Service-layer entry points refuse to run without an explicit tenant.
+- **Webhooks**: each merchant has its own endpoint `POST /api/webhooks/razorpay/<merchantId>` and its own webhook secret; the `X-Razorpay-Signature` HMAC over the raw body is verified before anything is processed, and the resulting records are owned by that merchant.
+- **Provisioning**: there is no self-service signup and no token-minting endpoint. Create a merchant and its first admin with `MERCHANT_PASSWORD='…' npm run merchant:create -w backend -- --merchant "Acme" --email admin@acme.example --role admin` (prints the webhook URL and secret once). Add users with `--merchant-id <id> --role reviewer|viewer`. Create an operator with `--role platform_admin`.
+- **Upgrading an existing database**: apply migration `drizzle/migrations/0001_merchant_auth.sql`. It creates the new tables and moves every pre-existing row to a seeded `merchant_default` tenant (which has no users until you create one). Create real merchants for new data.
+- **Production requirements**: `JWT_SECRET` of at least 32 random characters, an explicit `CORS_ORIGINS`/`FRONTEND_URL` (never `*`), and simulation stays off unless `ENABLE_SIMULATION=true`. Startup fails if these are missing or insecure.
 
 ---
 

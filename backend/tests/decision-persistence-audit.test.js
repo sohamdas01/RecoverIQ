@@ -12,7 +12,7 @@ import assert from 'node:assert';
 import crypto from 'crypto';
 import express from 'express';
 import axios from 'axios';
-import { AuthService } from '../services/auth/auth.service.js';
+import { createDefaultMerchantUser } from './helpers/auth-fixtures.js';
 import { ObservabilityService, AUDIT_EVENT_TYPES } from '../services/observability/index.js';
 import { RecoveryOrchestrator } from '../services/recovery/index.js';
 import { ReviewService, REVIEW_STATUSES } from '../services/review/index.js';
@@ -35,6 +35,7 @@ describe('Phase 5 - Step 6: Decision Persistence, Audit & Observability Tests', 
   let server;
   let BASE_URL;
   let merchantToken;
+  let reviewerUserId;
   let adminToken;
 
   before(async () => {
@@ -50,8 +51,10 @@ describe('Phase 5 - Step 6: Decision Persistence, Audit & Observability Tests', 
       });
     });
 
-    merchantToken = AuthService.generateMerchantToken('merchant_obs_123', 'merchant');
-    adminToken = AuthService.generateMerchantToken('admin_obs_999', 'admin');
+    const reviewer = await createDefaultMerchantUser('reviewer');
+    merchantToken = reviewer.token;
+    reviewerUserId = reviewer.user.id;
+    adminToken = (await createDefaultMerchantUser('admin')).token;
   });
 
   after(async () => {
@@ -161,7 +164,7 @@ describe('Phase 5 - Step 6: Decision Persistence, Audit & Observability Tests', 
         customer,
       });
 
-      const explanation = await ObservabilityService.getDecisionExplanation(result.decision.id);
+      const explanation = await ObservabilityService.getDecisionExplanation(result.decision.id, { system: true });
       assert.ok(explanation);
 
       // Verify Agent 1 and Agent 2 objects are distinct
@@ -205,7 +208,7 @@ describe('Phase 5 - Step 6: Decision Persistence, Audit & Observability Tests', 
       assert.strictEqual(result.decision.status, 'pending_review');
       assert.strictEqual(result.executionResult, null, 'Tool must NOT be executed');
 
-      const explanation = await ObservabilityService.getDecisionExplanation(result.decision.id);
+      const explanation = await ObservabilityService.getDecisionExplanation(result.decision.id, { system: true });
       assert.strictEqual(explanation.policy.decision, POLICY_DECISIONS.REQUIRE_APPROVAL);
       assert.ok(explanation.policy.appliedRules.includes(RULE_IDS.MAX_AMOUNT_CEILING));
       assert.strictEqual(explanation.status, 'pending_review');
@@ -236,7 +239,7 @@ describe('Phase 5 - Step 6: Decision Persistence, Audit & Observability Tests', 
       assert.strictEqual(result.decision.status, 'blocked');
       assert.strictEqual(result.executionResult, null);
 
-      const explanation = await ObservabilityService.getDecisionExplanation(result.decision.id);
+      const explanation = await ObservabilityService.getDecisionExplanation(result.decision.id, { system: true });
       assert.strictEqual(explanation.policy.decision, POLICY_DECISIONS.BLOCK);
       assert.ok(explanation.policy.appliedRules.includes(RULE_IDS.TERMINAL_STATE_RECOVERED));
     });
@@ -282,10 +285,11 @@ describe('Phase 5 - Step 6: Decision Persistence, Audit & Observability Tests', 
       assert.strictEqual(approveRes.data.policyDecision, POLICY_DECISIONS.ALLOW);
 
       // Verify Explanation Reconstructability
-      const explanation = await ObservabilityService.getDecisionExplanation(caseId);
+      const explanation = await ObservabilityService.getDecisionExplanation(caseId, { system: true });
       assert.ok(explanation.humanReview, 'humanReview object must be present');
       assert.strictEqual(explanation.humanReview.reviewAction, 'APPROVE');
-      assert.strictEqual(explanation.humanReview.reviewerId, 'merchant_obs_123');
+      // The audit trail records the authenticated reviewing user (not just the tenant)
+      assert.strictEqual(explanation.humanReview.reviewerId, reviewerUserId);
       assert.strictEqual(explanation.humanReview.policyBefore, 'REQUIRE_APPROVAL');
       assert.strictEqual(explanation.humanReview.policyAfter, 'ALLOW');
       assert.strictEqual(explanation.humanReview.ruleIdAfter, RULE_IDS.POLICY_CLEAR);
@@ -338,7 +342,7 @@ describe('Phase 5 - Step 6: Decision Persistence, Audit & Observability Tests', 
       assert.strictEqual(modifyRes.data.success, true);
       assert.strictEqual(modifyRes.data.reviewStatus, REVIEW_STATUSES.MODIFIED);
 
-      const explanation = await ObservabilityService.getDecisionExplanation(caseId);
+      const explanation = await ObservabilityService.getDecisionExplanation(caseId, { system: true });
       assert.ok(explanation.humanReview);
       assert.strictEqual(explanation.humanReview.reviewAction, 'MODIFY');
       assert.strictEqual(explanation.humanReview.modifiedAction, 'send_recovery_message');
@@ -381,7 +385,7 @@ describe('Phase 5 - Step 6: Decision Persistence, Audit & Observability Tests', 
       assert.strictEqual(rejectRes.data.reviewStatus, REVIEW_STATUSES.REJECTED);
       assert.strictEqual(rejectRes.data.execution.executed, false);
 
-      const explanation = await ObservabilityService.getDecisionExplanation(caseId);
+      const explanation = await ObservabilityService.getDecisionExplanation(caseId, { system: true });
       assert.strictEqual(explanation.status, 'rejected');
       assert.strictEqual(explanation.humanReview.reviewAction, 'REJECT');
       assert.strictEqual(explanation.humanReview.reasoning, 'Customer requested cancellation of account');
@@ -422,7 +426,7 @@ describe('Phase 5 - Step 6: Decision Persistence, Audit & Observability Tests', 
 
       assert.ok(result.decision);
 
-      const explanation = await ObservabilityService.getDecisionExplanation(result.decision.id);
+      const explanation = await ObservabilityService.getDecisionExplanation(result.decision.id, { system: true });
       assert.strictEqual(explanation.isReplay, true);
       assert.strictEqual(explanation.lineage.originalEventId, originalEventId);
       assert.strictEqual(explanation.lineage.replayEventId, replayEventId);
@@ -501,7 +505,7 @@ describe('Phase 5 - Step 6: Decision Persistence, Audit & Observability Tests', 
         customer,
       });
 
-      const explanation = await ObservabilityService.getDecisionExplanation(result.decision.id);
+      const explanation = await ObservabilityService.getDecisionExplanation(result.decision.id, { system: true });
       assert.strictEqual(explanation.transaction.metadata.apiKey, '[REDACTED]');
       assert.strictEqual(explanation.transaction.metadata.safeNote, 'Regular customer');
     });
