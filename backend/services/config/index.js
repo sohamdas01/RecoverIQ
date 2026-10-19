@@ -16,6 +16,20 @@ export const config = {
 
   // Auth & Security
   jwtSecret: process.env.JWT_SECRET || 'recoveriq-jwt-secret-key-default',
+  jwtExpiresIn: process.env.JWT_EXPIRES_IN || '8h',
+  jwtIssuer: 'recoveriq-backend',
+  jwtAudience: 'recoveriq-merchant-dashboard',
+  // Browser origins allowed to call the API (comma-separated). Falls back to FRONTEND_URL.
+  corsOrigins: (process.env.CORS_ORIGINS || process.env.FRONTEND_URL || 'http://localhost:3000')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean),
+  // Failed-login throttling (per email and per client IP)
+  loginRateLimit: {
+    maxFailuresPerEmail: parseInt(process.env.LOGIN_MAX_FAILURES_PER_EMAIL || '5', 10),
+    maxAttemptsPerIp: parseInt(process.env.LOGIN_MAX_ATTEMPTS_PER_IP || '30', 10),
+    windowSeconds: parseInt(process.env.LOGIN_RATE_WINDOW_SECONDS || '900', 10),
+  },
   recoveryLinkSecret: process.env.RECOVERY_LINK_SECRET || 'recoveriq-recovery-link-secret-default',
   recoveryLinkExpiryHours: 24,
   internalServiceToken: process.env.INTERNAL_SERVICE_TOKEN || 'recoveriq-internal-service-token-dev-secret',
@@ -61,6 +75,20 @@ export const config = {
     entityRecheckDelayMs: parseInt(process.env.RETRY_ENTITY_DELAY_MS || '100', 10),
   },
 };
+
+/**
+ * Purchase-failure simulation injects synthetic payment events into the live recovery pipeline.
+ * Enabled by default outside production; in production it must be switched on explicitly.
+ * Read at call time so it can be toggled per request/test.
+ */
+export function isSimulationEnabled(env = process.env) {
+  const flag = (env.ENABLE_SIMULATION || '').toLowerCase();
+  if (flag === 'true') return true;
+  if (flag === 'false') return false;
+  return (env.NODE_ENV || '').toLowerCase() !== 'production';
+}
+
+export const MIN_PRODUCTION_JWT_SECRET_LENGTH = 32;
 
 export const INSECURE_DEFAULT_SECRETS = new Set([
   'recoveriq-jwt-secret-key-default',
@@ -115,6 +143,18 @@ export function validateProductionConfig(env = process.env) {
     } else if (INSECURE_DEFAULT_SECRETS.has(value.trim())) {
       errors.push(`Insecure default secret detected in production: ${key}='${value.trim()}'`);
     }
+  }
+
+  const jwtSecret = (env.JWT_SECRET || '').trim();
+  if (jwtSecret && jwtSecret.length < MIN_PRODUCTION_JWT_SECRET_LENGTH) {
+    errors.push(`JWT_SECRET is too short for production (minimum ${MIN_PRODUCTION_JWT_SECRET_LENGTH} characters)`);
+  }
+
+  const corsOrigins = (env.CORS_ORIGINS || env.FRONTEND_URL || '').trim();
+  if (!corsOrigins) {
+    errors.push('Missing mandatory production setting: CORS_ORIGINS or FRONTEND_URL (allowed browser origins)');
+  } else if (corsOrigins.split(',').some((o) => o.trim() === '*')) {
+    errors.push("CORS_ORIGINS must not contain '*' in production");
   }
 
   if (errors.length > 0) {

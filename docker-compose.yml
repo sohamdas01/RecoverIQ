@@ -181,6 +181,7 @@ services:
       ML_SERVICE_URL: http://ml-service:8000
       GENAI_SERVICE_URL: http://genai-service:8001
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      ENABLE_SIMULATION: ${ENABLE_SIMULATION:-false}
       JWT_SECRET: ${JWT_SECRET:-recoveriq-super-secret-jwt-key-change-in-production}
       RECOVERY_LINK_SECRET: ${RECOVERY_LINK_SECRET:-recoveriq-recovery-link-signing-secret}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-recoveriq-internal-service-token-dev-secret}

@@ -13,7 +13,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import express from 'express';
 import axios from 'axios';
-import { AuthService } from '../services/auth/auth.service.js';
+import { createDefaultMerchantUser } from './helpers/auth-fixtures.js';
 import { ObservabilityService, AUDIT_EVENT_TYPES } from '../services/observability/index.js';
 import { closeDatabasePool } from '../db/index.js';
 import { disconnectRedis } from '../redis/redis.client.js';
@@ -40,7 +40,7 @@ describe('Phase 7 - Step 3: Live Recovery Activity Tests', () => {
       });
     });
 
-    merchantToken = AuthService.generateMerchantToken('merchant_test_user', 'admin');
+    merchantToken = (await createDefaultMerchantUser('admin')).token;
   });
 
   after(async () => {
@@ -51,8 +51,10 @@ describe('Phase 7 - Step 3: Live Recovery Activity Tests', () => {
     await closeDatabasePool();
   });
 
-  it('1. GET /api/decisions/activity should return HTTP 200 with success: true and data array', async () => {
-    const res = await axios.get(`${BASE_URL}/api/decisions/activity?limit=10`);
+  it('1. GET /api/decisions/activity should return HTTP 200 with success: true and data array (authenticated)', async () => {
+    const res = await axios.get(`${BASE_URL}/api/decisions/activity?limit=10`, {
+      headers: { Authorization: `Bearer ${merchantToken}` },
+    });
     assert.strictEqual(res.status, 200);
     assert.strictEqual(res.data.success, true);
     assert.strictEqual(typeof res.data.count, 'number');
@@ -69,7 +71,7 @@ describe('Phase 7 - Step 3: Live Recovery Activity Tests', () => {
   });
 
   it('3. ObservabilityService.getRecentActivity handles empty / offline database cleanly', async () => {
-    const activity = await ObservabilityService.getRecentActivity(10);
+    const activity = await ObservabilityService.getRecentActivity(10, { system: true });
     assert.strictEqual(Array.isArray(activity), true);
   });
 
@@ -120,7 +122,9 @@ describe('Phase 7 - Step 3: Live Recovery Activity Tests', () => {
   });
 
   it('6. Activity feed endpoint respects limit query parameter', async () => {
-    const res = await axios.get(`${BASE_URL}/api/decisions/activity?limit=3`);
+    const res = await axios.get(`${BASE_URL}/api/decisions/activity?limit=3`, {
+      headers: { Authorization: `Bearer ${merchantToken}` },
+    });
     assert.strictEqual(res.status, 200);
     assert.ok(res.data.data.length <= 3);
   });

@@ -2,7 +2,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'crypto';
 import { db, closeDatabasePool } from '../db/index.js';
-import { customers, transactions, decisions, actions, messages } from '../../drizzle/schema.js';
+import { customers, transactions, decisions, actions, messages, DEFAULT_MERCHANT_ID } from '../../drizzle/schema.js';
 import { eq } from 'drizzle-orm';
 import { disconnectRedis, redis, checkIdempotency } from '../redis/redis.client.js';
 import {
@@ -122,6 +122,7 @@ describe('Step 8: Comprehensive Pipeline Failure & Resilience Tests', () => {
       const [customer] = await db
         .insert(customers)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           name: 'Concurrent Test User',
           email: `concurrent.${Date.now()}@example.com`,
           phone: '+919876543230',
@@ -131,6 +132,7 @@ describe('Step 8: Comprehensive Pipeline Failure & Resilience Tests', () => {
       const [tx] = await db
         .insert(transactions)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           customerId: customer.id,
           amount: '1500.00',
           currency: 'INR',
@@ -191,6 +193,7 @@ describe('Step 8: Comprehensive Pipeline Failure & Resilience Tests', () => {
       const [customer] = await db
         .insert(customers)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           name: 'Outcome Dupe User',
           email: `outcome.dupe.${Date.now()}@example.com`,
           phone: '+919876543231',
@@ -200,6 +203,7 @@ describe('Step 8: Comprehensive Pipeline Failure & Resilience Tests', () => {
       const [tx] = await db
         .insert(transactions)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           customerId: customer.id,
           amount: '2000.00',
           currency: 'INR',
@@ -293,6 +297,7 @@ describe('Step 8: Comprehensive Pipeline Failure & Resilience Tests', () => {
       const [customer] = await db
         .insert(customers)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           name: 'Race Condition Customer',
           email: `race.${Date.now()}@example.com`,
           phone: '+919876543232',
@@ -318,6 +323,7 @@ describe('Step 8: Comprehensive Pipeline Failure & Resilience Tests', () => {
           const [createdTx] = await db
             .insert(transactions)
             .values({
+              merchantId: DEFAULT_MERCHANT_ID,
               customerId: customer.id,
               amount: '1800.00',
               currency: 'INR',
@@ -393,6 +399,7 @@ describe('Step 8: Comprehensive Pipeline Failure & Resilience Tests', () => {
       const [customer] = await db
         .insert(customers)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           name: 'Allow Path User',
           email: `allow.path.${Date.now()}@example.com`,
           phone: '+919876543233',
@@ -402,6 +409,7 @@ describe('Step 8: Comprehensive Pipeline Failure & Resilience Tests', () => {
       const [tx] = await db
         .insert(transactions)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           customerId: customer.id,
           amount: '1200.00',
           currency: 'INR',
@@ -445,6 +453,7 @@ describe('Step 8: Comprehensive Pipeline Failure & Resilience Tests', () => {
       const [customer] = await db
         .insert(customers)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           name: 'High Amount User',
           email: `high.value.${Date.now()}@example.com`,
           phone: '+919876543234',
@@ -454,6 +463,7 @@ describe('Step 8: Comprehensive Pipeline Failure & Resilience Tests', () => {
       const [tx] = await db
         .insert(transactions)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           customerId: customer.id,
           amount: '60000.00', // Exceeds maxAutoApprovalAmount (₹50,000)
           currency: 'INR',
@@ -506,6 +516,7 @@ describe('Step 8: Comprehensive Pipeline Failure & Resilience Tests', () => {
       const [customer] = await db
         .insert(customers)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           name: 'Fraud Suspect User',
           email: `fraud.${Date.now()}@example.com`,
           phone: '+919876543235',
@@ -515,6 +526,7 @@ describe('Step 8: Comprehensive Pipeline Failure & Resilience Tests', () => {
       const [tx] = await db
         .insert(transactions)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           customerId: customer.id,
           amount: '5000.00',
           currency: 'INR',
@@ -562,6 +574,7 @@ describe('Step 8: Comprehensive Pipeline Failure & Resilience Tests', () => {
       const [customer] = await db
         .insert(customers)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           name: 'Replay Guardrail User',
           email: `replay.guard.${Date.now()}@example.com`,
           phone: '+919876543236',
@@ -571,6 +584,7 @@ describe('Step 8: Comprehensive Pipeline Failure & Resilience Tests', () => {
       const [tx] = await db
         .insert(transactions)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           customerId: customer.id,
           amount: '75000.00', // High value
           currency: 'INR',
@@ -650,6 +664,7 @@ describe('Step 8: Comprehensive Pipeline Failure & Resilience Tests', () => {
       const [customer] = await db
         .insert(customers)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           name: 'Atomic User',
           email: `atomic.${Date.now()}@example.com`,
           phone: '+919876543237',
@@ -659,6 +674,7 @@ describe('Step 8: Comprehensive Pipeline Failure & Resilience Tests', () => {
       const [tx] = await db
         .insert(transactions)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           customerId: customer.id,
           amount: '5000.00',
           currency: 'INR',

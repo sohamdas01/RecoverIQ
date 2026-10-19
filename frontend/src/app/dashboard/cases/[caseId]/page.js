@@ -7,6 +7,7 @@ import Header from '@/components/Header';
 import { PolicyBadge, StatusBadge, ActionBadge } from '@/components/StatusBadge';
 import DecisionTimeline from '@/components/DecisionTimeline';
 import AskRecoverIQPanel from '@/components/AskRecoverIQPanel';
+import { useAuth } from '@/components/AuthProvider';
 import {
   fetchCaseExplanation,
   approveCase,
@@ -24,6 +25,7 @@ export default function CaseDetailPage({ params }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [actionLoading, setActionLoading] = useState(false);
+  const { canReview } = useAuth();
   const [feedback, setFeedback] = useState(null);
 
   // Review & Modification Modal State
@@ -316,7 +318,8 @@ export default function CaseDetailPage({ params }) {
               </p>
             </div>
 
-            {/* Action Buttons */}
+            {/* Action Buttons (reviewer / admin only; the backend enforces this too) */}
+            {canReview ? (
             <div className="flex items-center gap-2.5">
               <button
                 onClick={handleApprove}
@@ -346,6 +349,11 @@ export default function CaseDetailPage({ params }) {
                 <span>REJECT</span>
               </button>
             </div>
+            ) : (
+              <span className="px-3 py-1.5 text-xs font-semibold text-slate-300 bg-slate-800/60 border border-slate-700/60 rounded-lg">
+                Read-only access: your role cannot review cases
+              </span>
+            )}
           </div>
 
           {/* Quick Review Rationale Input */}

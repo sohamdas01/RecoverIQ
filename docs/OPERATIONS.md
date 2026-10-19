@@ -42,12 +42,27 @@ source .venv/bin/activate # or .venv\Scripts\activate on Windows
 uvicorn app.main:app --port 8000 --reload
 ```
 
-#### 3. Start Backend Orchestrator
+#### 3. Apply Database Migrations and Create the First Merchant
+```bash
+# Apply every SQL file in drizzle/migrations in order (0000 schema, 0001 merchant auth & tenancy)
+for f in drizzle/migrations/*.sql; do psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$f"; done
+
+# Create a merchant and its first admin login (password via env, never on the command line)
+cd backend
+MERCHANT_PASSWORD='use-a-long-random-passphrase' npm run merchant:create -- \
+  --merchant "Acme Payments" --email admin@acme.example --role admin
+```
+The command prints the merchant's Razorpay webhook URL and secret **once**. Create an operator who may use the DLQ endpoints with `--merchant-id <id> --role platform_admin`.
+
+#### 4. Start Backend Orchestrator
 ```bash
 cd backend
 npm install
 npm run dev
 ```
+
+#### 5. Sign in
+Open the dashboard and sign in at `/login`. API clients obtain a token with `POST /api/auth/login`.
 
 ---
 
@@ -177,8 +192,9 @@ node scripts/replay-event.js <dlqEventId> --inspect
 
 Using REST API:
 ```bash
+# Requires a platform_admin token: POST /api/auth/login as an operator account
 curl -X GET http://localhost:4000/api/admin/events/dlq/<dlqEventId> \
-  -H "Authorization: Bearer <ADMIN_JWT_TOKEN>"
+  -H "Authorization: Bearer <PLATFORM_ADMIN_TOKEN>"
 ```
 
 ---
@@ -204,9 +220,10 @@ curl -X GET http://localhost:4000/api/admin/events/dlq/<dlqEventId> \
    Or via authenticated HTTP request:
    ```bash
    curl -X POST http://localhost:4000/api/admin/events/<dlqEventId>/replay \
-     -H "Authorization: Bearer <ADMIN_JWT_TOKEN>" \
+     -H "Authorization: Bearer <PLATFORM_ADMIN_TOKEN>" \
      -H "Content-Type: application/json" \
-     -d '{"replayedBy": "ops_analyst_name"}'
+     -d '{"dryRun": true}'
+   # The replaying operator is recorded from the authenticated account; a client-supplied "replayedBy" is ignored.
    ```
 
 3. **Step 3: Verify Output & Lineage**

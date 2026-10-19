@@ -4,10 +4,13 @@ import { createTransaction } from '../../db/queries/transactions.queries.js';
 import { checkIdempotency } from '../../redis/redis.client.js';
 import { publishPaymentEvent } from '../../kafka/producer.js';
 import { EVENT_TYPES, FAILURE_REASONS, PAYMENT_METHODS } from '../../kafka/schemas/events.schema.js';
+import { DEFAULT_MERCHANT_ID } from '../../../drizzle/schema.js';
 
 export class EventProducerService {
   /**
-   * Ingest a payment failure event, persist to PostgreSQL, and publish to Kafka payment-events topic
+   * Ingest a payment failure event, persist to PostgreSQL, and publish to Kafka payment-events topic.
+   * `input.merchantId` names the owning tenant (HTTP callers always set it from the authenticated
+   * merchant or the verified webhook route). Internal callers that omit it write to the default tenant.
    */
   static async ingestAndPublishPaymentFailure(input) {
     // 1. Basic Input Validation
@@ -34,10 +37,12 @@ export class EventProducerService {
       throw new Error(`Invalid failureReason '${failureReason}'. Allowed: ${FAILURE_REASONS.join(', ')}`);
     }
 
-    // 2. Idempotency Check
+    const merchantId = input.merchantId || DEFAULT_MERCHANT_ID;
+
+    // 2. Idempotency Check (namespaced per merchant so one tenant can never suppress another's events)
     const dedupId = input.idempotencyKey || input.metadata?.razorpayPaymentId || input.eventId;
     if (dedupId) {
-      const isFirstOccurrence = await checkIdempotency(`idempotency:ingest:${dedupId}`, 86400);
+      const isFirstOccurrence = await checkIdempotency(`idempotency:ingest:${merchantId}:${dedupId}`, 86400);
       if (!isFirstOccurrence) {
         console.warn(`[Ingestion Producer] Duplicate event detected for key: ${dedupId}`);
         return {
@@ -52,12 +57,14 @@ export class EventProducerService {
 
     // 3. Persist Customer and Transaction in PostgreSQL (Source of Truth)
     const customer = await findOrCreateCustomer({
+      merchantId,
       name: input.customer.name || 'Customer',
       email: input.customer.email,
       phone: input.customer.phone || null,
     });
 
     const transaction = await createTransaction({
+      merchantId,
       customerId: customer.id,
       amount,
       currency: input.currency || 'INR',

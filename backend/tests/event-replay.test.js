@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import crypto from 'crypto';
 import express from 'express';
 import { db, closeDatabasePool } from '../db/index.js';
-import { customers, transactions, decisions, messages } from '../../drizzle/schema.js';
+import { customers, transactions, decisions, messages, DEFAULT_MERCHANT_ID } from '../../drizzle/schema.js';
 import { eq } from 'drizzle-orm';
 import { disconnectRedis } from '../redis/redis.client.js';
 import {
@@ -12,7 +12,7 @@ import {
   createConsumer,
 } from '../kafka/kafka.client.js';
 import { config } from '../services/config/index.js';
-import { AuthService } from '../services/auth/auth.service.js';
+import { createDefaultMerchantUser } from './helpers/auth-fixtures.js';
 import { routeToDlq } from '../kafka/dlq.service.js';
 import {
   findDlqEvent,
@@ -46,7 +46,7 @@ describe('Step 7: Event Replay Mechanism Tests', () => {
       });
     });
 
-    adminToken = AuthService.generateMerchantToken('test_admin_merchant_1', 'admin');
+    adminToken = (await createDefaultMerchantUser('platform_admin')).token;
   });
 
   after(async () => {
@@ -204,6 +204,7 @@ describe('Step 7: Event Replay Mechanism Tests', () => {
       const [customer] = await db
         .insert(customers)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           name: 'Replay Test User',
           email: `replay.user.${Date.now()}@example.com`,
           phone: '+919876543215',
@@ -213,6 +214,7 @@ describe('Step 7: Event Replay Mechanism Tests', () => {
       const [tx] = await db
         .insert(transactions)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           customerId: customer.id,
           amount: '2999.00',
           currency: 'INR',
@@ -322,6 +324,7 @@ describe('Step 7: Event Replay Mechanism Tests', () => {
       const [customer] = await db
         .insert(customers)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           name: 'API Replay User',
           email: `api.replay.${Date.now()}@example.com`,
           phone: '+919876543216',
@@ -331,6 +334,7 @@ describe('Step 7: Event Replay Mechanism Tests', () => {
       const [tx] = await db
         .insert(transactions)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           customerId: customer.id,
           amount: '1299.00',
           currency: 'INR',
@@ -395,6 +399,7 @@ describe('Step 7: Event Replay Mechanism Tests', () => {
       const [customer] = await db
         .insert(customers)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           name: 'E2E Replay User',
           email: `e2e.replay.${Date.now()}@example.com`,
           phone: '+919876543217',
@@ -404,6 +409,7 @@ describe('Step 7: Event Replay Mechanism Tests', () => {
       const [tx] = await db
         .insert(transactions)
         .values({
+          merchantId: DEFAULT_MERCHANT_ID,
           customerId: customer.id,
           amount: '1999.00',
           currency: 'INR',

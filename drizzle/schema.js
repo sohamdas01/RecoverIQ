@@ -1,18 +1,50 @@
-import { pgTable, text, timestamp, integer, numeric, real, jsonb } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, integer, numeric, real, jsonb, index, uniqueIndex } from 'drizzle-orm/pg-core';
 import crypto from 'crypto';
+
+// Seeded by migration 0001. Rows created without an explicit merchant (internal/legacy callers)
+// belong to this tenant; no login user is attached to it by default, so it is never exposed.
+export const DEFAULT_MERCHANT_ID = 'merchant_default';
+
+// 0a. Merchants Table (tenant)
+export const merchants = pgTable('merchants', {
+  id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
+  name: text('name').notNull(),
+  status: text('status').default('active').notNull(), // 'active', 'suspended'
+  webhookSecret: text('webhook_secret').notNull(), // HMAC secret used to verify this merchant's Razorpay webhooks
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+// 0b. Merchant Users Table (dashboard logins; each user belongs to exactly one merchant)
+export const merchantUsers = pgTable('merchant_users', {
+  id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
+  merchantId: text('merchant_id').references(() => merchants.id, { onDelete: 'cascade' }).notNull(),
+  email: text('email').notNull(), // stored lower-cased
+  passwordHash: text('password_hash').notNull(), // scrypt$N$r$p$salt$hash
+  role: text('role').default('viewer').notNull(), // 'viewer', 'reviewer', 'admin', 'platform_admin'
+  status: text('status').default('active').notNull(), // 'active', 'disabled'
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
+}, (t) => ({
+  emailUnique: uniqueIndex('merchant_users_email_unique').on(t.email),
+  merchantIdx: index('merchant_users_merchant_idx').on(t.merchantId),
+}));
 
 // 1. Customers Table
 export const customers = pgTable('customers', {
   id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
+  merchantId: text('merchant_id').references(() => merchants.id, { onDelete: 'cascade' }).notNull(),
   name: text('name').notNull(),
   email: text('email').notNull(),
   phone: text('phone'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-});
+}, (t) => ({
+  merchantEmailUnique: uniqueIndex('customers_merchant_email_unique').on(t.merchantId, t.email),
+}));
 
 // 2. Transactions Table
 export const transactions = pgTable('transactions', {
   id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
+  merchantId: text('merchant_id').references(() => merchants.id, { onDelete: 'cascade' }).notNull(),
   customerId: text('customer_id').references(() => customers.id, { onDelete: 'cascade' }).notNull(),
   amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
   currency: text('currency').default('INR').notNull(),
@@ -23,7 +55,9 @@ export const transactions = pgTable('transactions', {
   metadata: jsonb('metadata'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
-});
+}, (t) => ({
+  merchantCreatedIdx: index('transactions_merchant_created_idx').on(t.merchantId, t.createdAt),
+}));
 
 // 3. Decisions Table
 export const decisions = pgTable('decisions', {

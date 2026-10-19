@@ -25,6 +25,7 @@ import { acquireLock, releaseLock } from '../../redis/redis.client.js';
 import { publishOutcomeEvent } from '../../kafka/producer.js';
 import { EVENT_TYPES, OUTCOME_TYPES } from '../../kafka/schemas/events.schema.js';
 import { ObservabilityService, AUDIT_EVENT_TYPES, withSpan } from '../observability/index.js';
+import { resolveScope } from '../auth/tenant-scope.js';
 import { db } from '../../db/index.js';
 import { decisions } from '../../../drizzle/schema.js';
 import { eq } from 'drizzle-orm';
@@ -47,8 +48,9 @@ export class ReviewService {
    * @param {string} caseId Decision ID
    * @returns {Promise<Object|null>} Structured review details
    */
-  static async getCaseForReview(caseId) {
-    const record = await getDecisionById(caseId);
+  static async getCaseForReview(caseId, { merchantId, system } = {}) {
+    const scope = resolveScope({ merchantId, system });
+    const record = await getDecisionById(caseId, scope);
     if (!record) {
       return null;
     }
@@ -117,7 +119,8 @@ export class ReviewService {
    * Merchant APPROVE flow
    * Re-evaluates policy fresh with merchant approval, executes tool on ALLOW, and records audit trail.
    */
-  static async approveCase(caseId, { reviewerId = 'merchant_admin', reasoning = 'Approved by merchant' } = {}) {
+  static async approveCase(caseId, { reviewerId = 'merchant_admin', reasoning = 'Approved by merchant', merchantId, system } = {}) {
+    const scope = resolveScope({ merchantId, system });
     return withSpan('hitl.review', {
       attributes: {
         'case.id': caseId,
@@ -125,6 +128,14 @@ export class ReviewService {
         'reviewer.id': reviewerId,
       },
     }, async (reviewSpan) => {
+      const caseVisible = await getDecisionById(caseId, scope);
+      if (!caseVisible) {
+        // Checked before taking the review lock so another tenant cannot hold a lock on this case id
+        const notFound = new Error(`Recovery case '${caseId}' not found`);
+        notFound.statusCode = 404;
+        notFound.code = 'CASE_NOT_FOUND';
+        throw notFound;
+      }
       const lockKey = `lock:review:${caseId}`;
       const acquired = await acquireLock(lockKey, 10);
       if (!acquired) {
@@ -136,7 +147,7 @@ export class ReviewService {
 
       try {
         // 1. Fetch fresh authoritative state
-        const record = await getDecisionById(caseId);
+        const record = await getDecisionById(caseId, scope);
         if (!record) {
           const err = new Error(`Recovery case '${caseId}' not found`);
           err.statusCode = 404;
@@ -374,7 +385,10 @@ export class ReviewService {
     modifiedAction,
     modifiedParams = {},
     reasoning = 'Modified parameters by merchant',
+    merchantId,
+    system,
   } = {}) {
+    const scope = resolveScope({ merchantId, system });
     return withSpan('hitl.review', {
       attributes: {
         'case.id': caseId,
@@ -383,6 +397,14 @@ export class ReviewService {
         'target.action': modifiedAction || 'recommended',
       },
     }, async (reviewSpan) => {
+      const caseVisible = await getDecisionById(caseId, scope);
+      if (!caseVisible) {
+        // Checked before taking the review lock so another tenant cannot hold a lock on this case id
+        const notFound = new Error(`Recovery case '${caseId}' not found`);
+        notFound.statusCode = 404;
+        notFound.code = 'CASE_NOT_FOUND';
+        throw notFound;
+      }
       const lockKey = `lock:review:${caseId}`;
       const acquired = await acquireLock(lockKey, 10);
       if (!acquired) {
@@ -394,7 +416,7 @@ export class ReviewService {
 
       try {
         // 1. Fetch fresh authoritative state
-        const record = await getDecisionById(caseId);
+        const record = await getDecisionById(caseId, scope);
         if (!record) {
           const err = new Error(`Recovery case '${caseId}' not found`);
           err.statusCode = 404;
@@ -647,7 +669,10 @@ export class ReviewService {
   static async rejectCase(caseId, {
     reviewerId = 'merchant_admin',
     reasoning = 'Rejected by merchant',
+    merchantId,
+    system,
   } = {}) {
+    const scope = resolveScope({ merchantId, system });
     return withSpan('hitl.review', {
       attributes: {
         'case.id': caseId,
@@ -655,6 +680,14 @@ export class ReviewService {
         'reviewer.id': reviewerId,
       },
     }, async (reviewSpan) => {
+      const caseVisible = await getDecisionById(caseId, scope);
+      if (!caseVisible) {
+        // Checked before taking the review lock so another tenant cannot hold a lock on this case id
+        const notFound = new Error(`Recovery case '${caseId}' not found`);
+        notFound.statusCode = 404;
+        notFound.code = 'CASE_NOT_FOUND';
+        throw notFound;
+      }
       const lockKey = `lock:review:${caseId}`;
       const acquired = await acquireLock(lockKey, 10);
       if (!acquired) {
@@ -665,7 +698,7 @@ export class ReviewService {
       }
 
       try {
-        const record = await getDecisionById(caseId);
+        const record = await getDecisionById(caseId, scope);
         if (!record) {
           const err = new Error(`Recovery case '${caseId}' not found`);
           err.statusCode = 404;

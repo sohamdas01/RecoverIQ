@@ -2,7 +2,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import crypto from 'crypto';
 import express from 'express';
-import { AuthService } from '../services/auth/auth.service.js';
+import { createDefaultMerchantUser } from './helpers/auth-fixtures.js';
 import { ReviewService, REVIEW_STATUSES } from '../services/review/index.js';
 import { RecoveryOrchestrator } from '../services/recovery/index.js';
 import { evaluatePolicy, POLICY_DECISIONS, RULE_IDS } from '../services/policy/index.js';
@@ -39,8 +39,8 @@ describe('Phase 5 - Step 5: Human-in-the-Loop Approval Workflow Tests', () => {
       });
     });
 
-    merchantToken = AuthService.generateMerchantToken('merchant_test_123', 'merchant');
-    adminToken = AuthService.generateMerchantToken('admin_ops_999', 'admin');
+    merchantToken = (await createDefaultMerchantUser('reviewer')).token;
+    adminToken = (await createDefaultMerchantUser('admin')).token;
   });
 
   after(async () => {
@@ -83,7 +83,7 @@ describe('Phase 5 - Step 5: Human-in-the-Loop Approval Workflow Tests', () => {
       assert.strictEqual(result.decision.status, 'pending_review');
       assert.strictEqual(result.executionResult, null, 'Tool must NOT be executed for pending review');
 
-      const caseDetails = await ReviewService.getCaseForReview(result.decision.id);
+      const caseDetails = await ReviewService.getCaseForReview(result.decision.id, { system: true });
       assert.ok(caseDetails, 'Review record must be retrievable');
       assert.strictEqual(caseDetails.reviewStatus, REVIEW_STATUSES.PENDING_REVIEW);
       assert.strictEqual(caseDetails.policyDecision, 'REQUIRE_APPROVAL');
@@ -133,7 +133,7 @@ describe('Phase 5 - Step 5: Human-in-the-Loop Approval Workflow Tests', () => {
       assert.strictEqual(orchResult.decision.status, 'pending_review');
 
       // Human Merchant APPROVES via ReviewService
-      const approveResult = await ReviewService.approveCase(orchResult.decision.id, {
+      const approveResult = await ReviewService.approveCase(orchResult.decision.id, { system: true,
         reviewerId: 'merchant_finance_lead',
         reasoning: 'Verified customer relationship and approved high-value automated retry',
       });
@@ -191,7 +191,7 @@ describe('Phase 5 - Step 5: Human-in-the-Loop Approval Workflow Tests', () => {
       // Merchant tries to approve
       await assert.rejects(
         async () => {
-          await ReviewService.approveCase(orchResult.decision.id, {
+          await ReviewService.approveCase(orchResult.decision.id, { system: true,
             reviewerId: 'admin_ops',
             reasoning: 'Late approval',
           });
@@ -232,7 +232,7 @@ describe('Phase 5 - Step 5: Human-in-the-Loop Approval Workflow Tests', () => {
         },
       });
 
-      const approveResult = await ReviewService.approveCase(decision.id, {
+      const approveResult = await ReviewService.approveCase(decision.id, { system: true,
         reviewerId: 'admin_ops',
         reasoning: 'Attempted override on fraud',
       });
@@ -283,7 +283,7 @@ describe('Phase 5 - Step 5: Human-in-the-Loop Approval Workflow Tests', () => {
       });
 
       // Merchant modifies action to send_recovery_message with custom SMS message
-      const modifyResult = await ReviewService.modifyCase(orchResult.decision.id, {
+      const modifyResult = await ReviewService.modifyCase(orchResult.decision.id, { system: true,
         reviewerId: 'merchant_cx_lead',
         modifiedAction: 'send_recovery_message',
         modifiedParams: {
@@ -336,7 +336,7 @@ describe('Phase 5 - Step 5: Human-in-the-Loop Approval Workflow Tests', () => {
 
       await assert.rejects(
         async () => {
-          await ReviewService.modifyCase(orchResult.decision.id, {
+          await ReviewService.modifyCase(orchResult.decision.id, { system: true,
             reviewerId: 'merchant_admin',
             modifiedAction: 'send_recovery_message',
             modifiedParams: {
@@ -373,7 +373,7 @@ describe('Phase 5 - Step 5: Human-in-the-Loop Approval Workflow Tests', () => {
         customer,
       });
 
-      const modifyResult = await ReviewService.modifyCase(orchResult.decision.id, {
+      const modifyResult = await ReviewService.modifyCase(orchResult.decision.id, { system: true,
         reviewerId: 'security_auditor',
         modifiedAction: 'send_recovery_message',
         modifiedParams: {
@@ -420,7 +420,7 @@ describe('Phase 5 - Step 5: Human-in-the-Loop Approval Workflow Tests', () => {
         customer,
       });
 
-      const rejectResult = await ReviewService.rejectCase(orchResult.decision.id, {
+      const rejectResult = await ReviewService.rejectCase(orchResult.decision.id, { system: true,
         reviewerId: 'risk_officer_1',
         reasoning: 'Customer account flagged for manual fraud investigation. Automated recovery declined.',
       });
@@ -550,13 +550,13 @@ describe('Phase 5 - Step 5: Human-in-the-Loop Approval Workflow Tests', () => {
       const orchResult = await RecoveryOrchestrator.orchestrateRecovery({ transaction, customer });
 
       // First approve succeeds
-      const first = await ReviewService.approveCase(orchResult.decision.id);
+      const first = await ReviewService.approveCase(orchResult.decision.id, { system: true });
       assert.strictEqual(first.success, true);
 
       // Second approve fails
       await assert.rejects(
         async () => {
-          await ReviewService.approveCase(orchResult.decision.id);
+          await ReviewService.approveCase(orchResult.decision.id, { system: true });
         },
         (err) => {
           assert.strictEqual(err.statusCode, 400);
@@ -585,12 +585,12 @@ describe('Phase 5 - Step 5: Human-in-the-Loop Approval Workflow Tests', () => {
       const orchResult = await RecoveryOrchestrator.orchestrateRecovery({ transaction, customer });
 
       // Reject first
-      await ReviewService.rejectCase(orchResult.decision.id);
+      await ReviewService.rejectCase(orchResult.decision.id, { system: true });
 
       // Attempt approve
       await assert.rejects(
         async () => {
-          await ReviewService.approveCase(orchResult.decision.id);
+          await ReviewService.approveCase(orchResult.decision.id, { system: true });
         },
         (err) => {
           assert.strictEqual(err.statusCode, 400);
@@ -617,12 +617,12 @@ describe('Phase 5 - Step 5: Human-in-the-Loop Approval Workflow Tests', () => {
       });
 
       const orchResult = await RecoveryOrchestrator.orchestrateRecovery({ transaction, customer });
-      await ReviewService.approveCase(orchResult.decision.id);
+      await ReviewService.approveCase(orchResult.decision.id, { system: true });
 
       // Attempt modify after execution
       await assert.rejects(
         async () => {
-          await ReviewService.modifyCase(orchResult.decision.id, {
+          await ReviewService.modifyCase(orchResult.decision.id, { system: true,
             modifiedAction: 'send_recovery_message',
           });
         },
@@ -658,8 +658,8 @@ describe('Phase 5 - Step 5: Human-in-the-Loop Approval Workflow Tests', () => {
       const orchResult = await RecoveryOrchestrator.orchestrateRecovery({ transaction, customer });
 
       const results = await Promise.allSettled([
-        ReviewService.approveCase(orchResult.decision.id, { reviewerId: 'reviewer_A' }),
-        ReviewService.approveCase(orchResult.decision.id, { reviewerId: 'reviewer_B' }),
+        ReviewService.approveCase(orchResult.decision.id, { system: true, reviewerId: 'reviewer_A' }),
+        ReviewService.approveCase(orchResult.decision.id, { system: true, reviewerId: 'reviewer_B' }),
       ]);
 
       const fulfilled = results.filter((r) => r.status === 'fulfilled');
@@ -688,8 +688,8 @@ describe('Phase 5 - Step 5: Human-in-the-Loop Approval Workflow Tests', () => {
       const orchResult = await RecoveryOrchestrator.orchestrateRecovery({ transaction, customer });
 
       const results = await Promise.allSettled([
-        ReviewService.approveCase(orchResult.decision.id, { reviewerId: 'approver' }),
-        ReviewService.rejectCase(orchResult.decision.id, { reviewerId: 'rejecter' }),
+        ReviewService.approveCase(orchResult.decision.id, { system: true, reviewerId: 'approver' }),
+        ReviewService.rejectCase(orchResult.decision.id, { system: true, reviewerId: 'rejecter' }),
       ]);
 
       const fulfilled = results.filter((r) => r.status === 'fulfilled');

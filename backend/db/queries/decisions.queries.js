@@ -1,6 +1,6 @@
 import { db } from '../index.js';
 import { decisions, transactions, customers } from '../../../drizzle/schema.js';
-import { eq, desc } from 'drizzle-orm';
+import { and, eq, desc } from 'drizzle-orm';
 
 export async function createDecision(data) {
   const [decision] = await db.insert(decisions).values({
@@ -16,7 +16,11 @@ export async function createDecision(data) {
   return decision;
 }
 
-export async function getDecisionById(id) {
+/**
+ * @param {string} id
+ * @param {{ merchantId?: string }} [scope] Restrict to one merchant's cases (cross-tenant ids read as "not found").
+ */
+export async function getDecisionById(id, { merchantId } = {}) {
   const [decision] = await db
     .select({
       decision: decisions,
@@ -26,12 +30,16 @@ export async function getDecisionById(id) {
     .from(decisions)
     .innerJoin(transactions, eq(decisions.transactionId, transactions.id))
     .innerJoin(customers, eq(transactions.customerId, customers.id))
-    .where(eq(decisions.id, id))
+    .where(
+      merchantId
+        ? and(eq(decisions.id, id), eq(transactions.merchantId, merchantId))
+        : eq(decisions.id, id)
+    )
     .limit(1);
   return decision || null;
 }
 
-export async function getPendingReviewDecisions() {
+export async function getPendingReviewDecisions({ merchantId } = {}) {
   return db
     .select({
       decision: decisions,
@@ -41,7 +49,11 @@ export async function getPendingReviewDecisions() {
     .from(decisions)
     .innerJoin(transactions, eq(decisions.transactionId, transactions.id))
     .innerJoin(customers, eq(transactions.customerId, customers.id))
-    .where(eq(decisions.status, 'pending_review'))
+    .where(
+      merchantId
+        ? and(eq(decisions.status, 'pending_review'), eq(transactions.merchantId, merchantId))
+        : eq(decisions.status, 'pending_review')
+    )
     .orderBy(desc(decisions.createdAt));
 }
 
@@ -57,8 +69,8 @@ export async function updateDecisionStatus(id, status, finalAction) {
   return updated;
 }
 
-export async function getRecentDecisions(limit = 50) {
-  return db
+export async function getRecentDecisions(limit = 50, { merchantId } = {}) {
+  const query = db
     .select({
       decision: decisions,
       transaction: transactions,
@@ -66,7 +78,9 @@ export async function getRecentDecisions(limit = 50) {
     })
     .from(decisions)
     .innerJoin(transactions, eq(decisions.transactionId, transactions.id))
-    .innerJoin(customers, eq(transactions.customerId, customers.id))
+    .innerJoin(customers, eq(transactions.customerId, customers.id));
+
+  return (merchantId ? query.where(eq(transactions.merchantId, merchantId)) : query)
     .orderBy(desc(decisions.createdAt))
     .limit(limit);
 }

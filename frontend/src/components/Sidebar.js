@@ -2,10 +2,18 @@
 
 import React from 'react';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
+import { useAuth } from '@/components/AuthProvider';
 
 export default function Sidebar({ isOpen, onClose }) {
   const pathname = usePathname();
+  const router = useRouter();
+  const { user, logout, isAdmin } = useAuth();
+
+  const handleSignOut = () => {
+    logout();
+    router.replace('/login');
+  };
 
   const navItems = [
     {
@@ -18,11 +26,13 @@ export default function Sidebar({ isOpen, onClose }) {
       href: '/dashboard/cases',
       exact: false,
     },
-    {
-      name: 'Simulate Purchase',
-      href: '/simulate',
-      exact: true,
-    },
+    ...(isAdmin
+      ? [{
+          name: 'Simulate Purchase',
+          href: '/simulate',
+          exact: true,
+        }]
+      : []),
   ];
 
   return (
@@ -91,6 +101,22 @@ export default function Sidebar({ isOpen, onClose }) {
         </div>
 
         <div className="p-4 border-t border-slate-800/80 bg-slate-950/40">
+          {user && (
+            <div className="mb-3 pb-3 border-b border-slate-800/80 space-y-2">
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-slate-200 truncate" title={user.email}>{user.email}</div>
+                <div className="text-[11px] text-slate-500 truncate">
+                  {user.merchant?.name} · <span className="font-mono uppercase">{user.role}</span>
+                </div>
+              </div>
+              <button
+                onClick={handleSignOut}
+                className="w-full px-3 py-1.5 text-xs font-semibold text-slate-300 bg-slate-800/60 hover:bg-slate-800 border border-slate-700/60 rounded-lg transition"
+              >
+                Sign out
+              </button>
+            </div>
+          )}
           <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
             <span className="font-medium">Guardrail Safety Engine</span>
             <span className="inline-flex items-center gap-1 text-[11px] text-emerald-400 font-medium">

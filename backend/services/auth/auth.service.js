@@ -30,7 +30,7 @@ export class AuthService {
    */
   static verifyRecoveryToken(token) {
     try {
-      const decoded = jwt.verify(token, config.recoveryLinkSecret);
+      const decoded = jwt.verify(token, config.recoveryLinkSecret, { algorithms: ['HS256'] });
       return decoded;
     } catch (err) {
       return null;
@@ -38,22 +38,41 @@ export class AuthService {
   }
 
   /**
-   * Generate JWT for merchant dashboard session
+   * Issue a signed access token for a merchant dashboard session.
+   * Identity is `sub` (user id) + `mid` (merchant id). Authorization data (role, status)
+   * is always re-read from the database by the auth middleware, not trusted from the token.
    */
-  static generateMerchantToken(merchantId, role = 'admin') {
+  static issueMerchantToken({ userId, merchantId, role }) {
+    if (!userId || !merchantId) {
+      throw new Error('userId and merchantId are required to issue a merchant token');
+    }
     return jwt.sign(
-      { merchantId, role },
+      { sub: userId, mid: merchantId, role },
       config.jwtSecret,
-      { expiresIn: '7d' }
+      {
+        algorithm: 'HS256',
+        expiresIn: config.jwtExpiresIn,
+        issuer: config.jwtIssuer,
+        audience: config.jwtAudience,
+      }
     );
   }
 
   /**
-   * Verify merchant JWT
+   * Verify a merchant access token. Pins the algorithm (rejects `none` / unexpected algs),
+   * issuer and audience. Returns the claims, or null if invalid/expired.
    */
   static verifyMerchantToken(token) {
     try {
-      return jwt.verify(token, config.jwtSecret);
+      const decoded = jwt.verify(token, config.jwtSecret, {
+        algorithms: ['HS256'],
+        issuer: config.jwtIssuer,
+        audience: config.jwtAudience,
+      });
+      if (!decoded || typeof decoded.sub !== 'string' || typeof decoded.mid !== 'string') {
+        return null;
+      }
+      return decoded;
     } catch (err) {
       return null;
     }

@@ -113,13 +113,19 @@ router.get('/ready', async (req, res) => {
 });
 
 /**
+ * Public probes expose status only: broker hostnames, cluster id, topic names and raw
+ * error text are infrastructure details and are never returned to unauthenticated callers.
+ */
+const publicKafkaStatus = (kafkaHealth) => ({ status: kafkaHealth?.status === 'healthy' ? 'healthy' : 'unreachable' });
+
+/**
  * Dedicated Kafka Health Probe (Backwards Compatibility)
  */
 router.get('/kafka', async (req, res) => {
   const kafkaChecker = req.app?.locals?.kafkaChecker || checkKafkaHealth;
   const kafkaHealth = await kafkaChecker();
   const statusCode = kafkaHealth.status === 'healthy' ? 200 : 503;
-  res.status(statusCode).json(kafkaHealth);
+  res.status(statusCode).json(publicKafkaStatus(kafkaHealth));
 });
 
 /**
@@ -133,7 +139,7 @@ router.get('/', async (req, res) => {
     service: 'recoveriq-backend',
     version: '1.0.0',
     timestamp: new Date().toISOString(),
-    kafka: kafkaHealth,
+    kafka: publicKafkaStatus(kafkaHealth),
   });
 });
 
