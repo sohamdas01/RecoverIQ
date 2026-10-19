@@ -1,13 +1,19 @@
+# Build context is the repository root (see docker-compose.yml): the backend imports
+# ../../drizzle/schema.js and resolves its dependencies through the npm workspace root.
 FROM node:22-alpine
 
 WORKDIR /app
 
-# Install dependencies
-COPY package*.json ./
-RUN npm ci --omit=dev
+# Install production dependencies from the root workspace lockfile (backend workspace only)
+COPY package.json package-lock.json ./
+COPY backend/package.json backend/package.json
+RUN npm ci --omit=dev -w backend
 
-# Copy application source code
-COPY . .
+# Copy only what the backend needs at runtime: shared DB schema + migrations, then backend source
+COPY drizzle/ drizzle/
+COPY backend/ backend/
+
+WORKDIR /app/backend
 
 # Expose backend service port
 EXPOSE 4000

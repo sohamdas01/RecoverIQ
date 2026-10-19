@@ -1,5 +1,6 @@
 import { getRecentDecisions, getDecisionById, getPendingReviewDecisions } from '../../db/queries/decisions.queries.js';
 import { ReviewService } from '../../services/review/index.js';
+import { ObservabilityService } from '../../services/observability/index.js';
 
 export async function listDecisions(req, res, next) {
   try {
@@ -14,6 +15,21 @@ export async function listDecisions(req, res, next) {
       success: true,
       count: decisions.length,
       data: decisions,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function listActivity(req, res, next) {
+  try {
+    const limit = parseInt(req.query.limit || '50', 10);
+    const activity = await ObservabilityService.getRecentActivity(limit);
+
+    return res.status(200).json({
+      success: true,
+      count: activity.length,
+      data: activity,
     });
   } catch (error) {
     next(error);

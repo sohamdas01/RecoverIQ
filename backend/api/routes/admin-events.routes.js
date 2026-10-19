@@ -4,8 +4,16 @@ import {
   replayDlqEventHandler,
   getDlqEventHandler,
 } from '../controllers/admin-events.controller.js';
+import { askRecoverIQ } from '../controllers/recovery-cases.controller.js';
 
 const router = express.Router();
+
+/**
+ * @route   POST /api/admin/ask
+ * @desc    Ask RecoverIQ Grounded Explainer QA
+ * @access  Private (Admin / Merchant Auth required)
+ */
+router.post('/ask', requireMerchantAuth, askRecoverIQ);
 
 /**
  * @route   GET /api/admin/events/dlq/:dlqEventId

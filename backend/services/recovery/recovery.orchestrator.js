@@ -258,6 +258,7 @@ export class RecoveryOrchestrator {
           rationale: agent1Analysis.rationale,
           reasonCodes: agent1Analysis.reasonCodes || [],
           suggestedParameters: ObservabilityService.sanitizeForAudit(agent1Analysis.suggestedParameters || {}),
+          playbookSources: agent1Analysis.playbookSources || [],
           isFallback: agent1Analysis.isFallback || false,
           latencyMs: agent1Analysis.latencyMs || null,
           timestamp: new Date().toISOString(),

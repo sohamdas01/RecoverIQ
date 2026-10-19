@@ -20,7 +20,7 @@ flowchart TD
     subgraph Pipeline["2. Recovery Worker & Multi-Agent Pipeline"]
         TOPIC_PAY --> RW["Recovery Consumer\n(recovery-worker-group)"]
         RW -->|Authoritative State| DB
-        RW -->|1. Statistical Scoring| ML["ML Service\n(LightGBM + TreeSHAP)"]
+        RW -->|1. Statistical Scoring| ML["ML Service\n(XGBoost + TreeSHAP)"]
         RW -->|2. Diagnostic Reasoning| A1["Agent 1: Recovery Analyst\n(Root Cause & Strategy)"]
         RW -->|3. Action Plan & Params| A2["Agent 2: Recovery Executor\n(Concrete Tool Proposal)"]
         RW -->|4. Deterministic Evaluation| PE["Policy Engine\n(Sole Execution Authority)"]
