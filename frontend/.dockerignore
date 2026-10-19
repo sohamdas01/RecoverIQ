@@ -1,0 +1,33 @@
+# Version control & editors
+.git
+.gitignore
+.vscode
+.idea
+
+# Dependencies & build output (installed / rebuilt inside the image)
+**/node_modules
+.next
+out
+build
+coverage
+.vercel
+*.tsbuildinfo
+next-env.d.ts
+
+# Real environment files & secrets (keep only the template).
+# NEXT_PUBLIC_BACKEND_URL is supplied via the Dockerfile build ARG instead.
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*.key
+
+# Development-only files
+eslint.config.mjs
+**/*.md
+**/*.log
+npm-debug.log*
+
+# Docker build files
+Dockerfile
+.dockerignore

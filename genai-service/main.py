@@ -19,9 +19,12 @@ from agents.schemas import (
     RecoveryExecutorInput,
     RecoveryExecutorOutput,
     TransactionContext,
+    AskRecoverIQInput,
+    AskRecoverIQOutput,
 )
 from agents.recovery_analyst import RecoveryAnalystAgent
 from agents.recovery_executor import RecoveryExecutorAgent
+from agents.ask_engine import AskRecoverIQEngine
 
 app = FastAPI(
     title="RecoverIQ GenAI Service",
@@ -97,6 +100,7 @@ async def verify_internal_token(
 # Initialize Autonomous Agents
 recovery_analyst = RecoveryAnalystAgent()
 recovery_executor = RecoveryExecutorAgent()
+ask_engine = AskRecoverIQEngine()
 
 
 @app.get("/health/live")
@@ -111,7 +115,7 @@ def liveness_probe():
 @app.get("/health/ready")
 def readiness_probe():
     """Readiness probe: returns 200 if agents are loaded and ready."""
-    is_ready = recovery_analyst is not None and recovery_executor is not None
+    is_ready = recovery_analyst is not None and recovery_executor is not None and ask_engine is not None
     if not is_ready:
         raise HTTPException(
             status_code=503,
@@ -124,6 +128,7 @@ def readiness_probe():
         "agents": {
             "recovery_analyst": "active",
             "recovery_executor": "active",
+            "ask_engine": "active",
         },
     }
 
@@ -137,8 +142,22 @@ def health_check():
         "agents": {
             "recovery_analyst": "active",
             "recovery_executor": "active",
+            "ask_engine": "active",
         }
     }
+
+
+@app.post("/internal/ask", response_model=AskRecoverIQOutput, dependencies=[Depends(verify_internal_token)])
+async def ask_recoveriq_internal(payload: AskRecoverIQInput):
+    """
+    Internal API for Ask RecoverIQ QA Explainer.
+    Synthesizes answers strictly grounded in supplied decision lineage / audit evidence.
+    """
+    try:
+        result = ask_engine.answer(payload)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ask RecoverIQ processing error: {str(e)}")
 
 
 @app.post("/internal/recovery/analyze", response_model=RecoveryAnalystOutput, dependencies=[Depends(verify_internal_token)])

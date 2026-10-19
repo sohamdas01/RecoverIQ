@@ -1,0 +1,33 @@
+# Version control & editors
+.git
+.gitignore
+.vscode
+.idea
+
+# Python caches & virtual environments
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+venv
+.venv
+env
+
+# Real environment files & secrets (keep only the template)
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*.key
+
+# Development-only files
+tests
+**/*.md
+**/*.log
+
+# Docker build files
+Dockerfile
+.dockerignore

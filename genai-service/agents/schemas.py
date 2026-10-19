@@ -1,11 +1,12 @@
 """
 RecoverIQ GenAI Service - Multi-Agent Schemas
 Phase 5 - Step 3: Agent 1 (Analyst) & Agent 2 (Executor / Action Planner)
+Phase 7 - Step 6: Ask RecoverIQ Grounded Question Answering
 """
 
 from enum import Enum
 from typing import Optional, List, Dict, Any, Literal
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class RecoveryActionEnum(str, Enum):
@@ -88,7 +89,7 @@ class CustomerHistoryContext(BaseModel):
 
 
 class MLPredictionContext(BaseModel):
-    probability: float = Field(ge=0.0, le=1.0, description="LightGBM recovery likelihood score")
+    probability: float = Field(ge=0.0, le=1.0, description="XGBoost recovery likelihood score")
     reason_codes: List[str] = Field(default_factory=list, description="Top TreeSHAP feature attributions")
     model_version: Optional[str] = Field(default="v1.0.0")
 
@@ -98,50 +99,77 @@ class MLPredictionContext(BaseModel):
 # -------------------------------------------------------------
 class RecoveryAnalystInput(BaseModel):
     transaction: TransactionContext
-    customerHistory: Optional[CustomerHistoryContext] = Field(default_factory=CustomerHistoryContext)
-    subscription: bool = Field(default=False, description="Whether transaction is a recurring subscription mandate")
+    customerHistory: Optional[CustomerHistoryContext] = None
+    subscription: Optional[bool] = False
     mlPrediction: Optional[MLPredictionContext] = None
-    failureReason: Optional[str] = None
-    attemptCount: Optional[int] = None
-    relevantRecoveryContext: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    systemContext: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
-    @field_validator("transaction", mode="before")
+
+class PlaybookSource(BaseModel):
+    id: Optional[str] = None
+    playbookId: Optional[str] = None
+    title: Optional[str] = None
+    ruleTitle: Optional[str] = None
+    strategy: Optional[str] = None
+    similarity: Optional[float] = None
+    similarityScore: Optional[float] = None
+    failureType: Optional[str] = None
+    summary: Optional[str] = None
+
+    @model_validator(mode="before")
     @classmethod
-    def extract_transaction(cls, v):
-        if isinstance(v, dict):
-            if "amount" in v:
-                v["amount"] = float(v["amount"])
-        return v
+    def sync_aliases(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            pid = data.get("playbookId") or data.get("id") or data.get("playbook_id")
+            if pid:
+                data["playbookId"] = pid
+                data["id"] = pid
+            title = data.get("ruleTitle") or data.get("title")
+            if title:
+                data["ruleTitle"] = title
+                data["title"] = title
+            score = data.get("similarityScore") or data.get("similarity") or data.get("similarity_score")
+            if score is not None:
+                data["similarityScore"] = score
+                data["similarity"] = score
+        return data
 
 
 class RecoveryAnalystOutput(BaseModel):
+    """
+    Structured recommendation output produced by Agent 1 (Recovery Analyst).
+    """
     recommendation: RecoveryActionEnum = Field(
-        description="Recommended bounded recovery action from the allowed enum"
+        description="Recommended action selected from the supported enum"
     )
     confidence: float = Field(
         ge=0.0,
         le=1.0,
-        description="Analyst confidence score between 0.0 and 1.0"
+        description="Agent confidence in the recommendation"
     )
     reasonCodes: List[str] = Field(
         default_factory=list,
-        description="Machine-readable uppercase reason codes justifying the strategy"
+        description="Machine-readable uppercase reason codes justifying the decision"
     )
     rationale: str = Field(
         min_length=5,
         max_length=1500,
-        description="Human-readable analytical explanation based strictly on supplied context"
+        description="Detailed strategic explanation for the recommendation"
     )
-    suggestedParameters: Dict[str, Any] = Field(
+    suggestedParameters: Optional[Dict[str, Any]] = Field(
         default_factory=dict,
-        description="Non-executable advisory parameters (e.g. channel, retry delay, template)"
+        description="Optional initial parameter suggestions passed to Agent 2"
+    )
+    playbookSources: Optional[List[PlaybookSource]] = Field(
+        default_factory=list,
+        description="Playbook entries retrieved from Qdrant and used for grounding"
     )
     metadata: Optional[Dict[str, Any]] = Field(
         default_factory=lambda: {
             "agentName": "RecoveryAnalyst",
             "agentVersion": "v1.0",
         },
-        description="Agent execution metadata"
+        description="Agent telemetry metadata"
     )
 
     @field_validator("reasonCodes")
@@ -155,33 +183,19 @@ class RecoveryAnalystOutput(BaseModel):
 # -------------------------------------------------------------
 class RecoveryExecutorInput(BaseModel):
     """
-    Structured input provided to Agent 2 (Recovery Executor / Action Planner).
-    Contains transaction, ML prediction, Agent 1 recommendation, and available actions.
+    Strict input contract for Agent 2.
+    Requires Agent 1's recommendation and full context.
     """
     transaction: TransactionContext
-    customerHistory: Optional[CustomerHistoryContext] = Field(default_factory=CustomerHistoryContext)
+    customerHistory: Optional[CustomerHistoryContext] = None
     mlPrediction: Optional[MLPredictionContext] = None
-    agent1Recommendation: RecoveryAnalystOutput = Field(
-        description="Structured recommendation received from Agent 1 (Recovery Analyst)"
-    )
-    availableActions: List[RecoveryActionEnum] = Field(
-        default_factory=lambda: list(RecoveryActionEnum),
-        description="List of platform-supported bounded recovery actions"
-    )
-    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
-
-    @field_validator("transaction", mode="before")
-    @classmethod
-    def extract_transaction(cls, v):
-        if isinstance(v, dict) and "amount" in v:
-            v["amount"] = float(v["amount"])
-        return v
+    agent1Recommendation: RecoveryAnalystOutput
+    systemContext: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
     @field_validator("agent1Recommendation", mode="before")
     @classmethod
-    def parse_agent1(cls, v):
+    def parse_analyst_recommendation(cls, v):
         if isinstance(v, dict):
-            # Normalize action -> recommendation alias if needed
             if "action" in v and "recommendation" not in v:
                 v["recommendation"] = v["action"]
             if "reasoning" in v and "rationale" not in v:
@@ -230,3 +244,28 @@ class RecoveryExecutorOutput(BaseModel):
     @classmethod
     def validate_reason_codes(cls, v):
         return [str(code).strip().upper().replace(" ", "_") for code in v if str(code).strip()]
+
+
+# -------------------------------------------------------------
+# Ask RecoverIQ Schemas
+# -------------------------------------------------------------
+class EvidenceReference(BaseModel):
+    caseId: Optional[str] = None
+    transactionId: Optional[str] = None
+    stage: Optional[str] = None
+    ruleId: Optional[str] = None
+    playbookId: Optional[str] = None
+    timestamp: Optional[str] = None
+    detail: Optional[str] = None
+
+
+class AskRecoverIQInput(BaseModel):
+    question: str = Field(min_length=1, max_length=1000, description="Merchant inquiry question")
+    evidence: List[Dict[str, Any]] = Field(default_factory=list, description="Structured factual recovery evidence")
+    caseId: Optional[str] = Field(default=None, description="Optional target recovery case identifier")
+
+
+class AskRecoverIQOutput(BaseModel):
+    answer: str = Field(description="Strictly evidence-grounded explanatory answer")
+    evidence: List[EvidenceReference] = Field(default_factory=list, description="Citations from supplied evidence")
+    isGrounded: bool = Field(default=True, description="Flag indicating if the response is fully grounded in audit data")

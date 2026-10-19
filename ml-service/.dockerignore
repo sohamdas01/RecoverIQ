@@ -1,0 +1,36 @@
+# Version control & editors
+.git
+.gitignore
+.vscode
+.idea
+
+# Python caches & virtual environments
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+venv
+.venv
+env
+
+# Real environment files & secrets (keep only the template)
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*.key
+
+# Offline-only files: the service loads the static artifacts/ model and never trains or reads datasets at runtime.
+# (artifacts/model.joblib, metadata.json and evaluation_report.json are intentionally kept.)
+tests
+data
+training
+**/*.md
+**/*.log
+
+# Docker build files
+Dockerfile
+.dockerignore

@@ -12,7 +12,7 @@ This runbook provides operational instructions for starting, monitoring, diagnos
 | **Redpanda (Kafka)** | Redpanda v24.x | `19092` (Kafka API), `8082` (HTTP Proxy) | `GET http://localhost:4000/health/kafka` |
 | **PostgreSQL** | PostgreSQL 16 | `5433` | `pg_isready -h localhost -p 5433` |
 | **Redis** | Redis 7 | `6379` | `redis-cli -p 6379 ping` |
-| **ML Microservice** | FastAPI / LightGBM | `8000` | `GET http://localhost:8000/health` |
+| **ML Microservice** | FastAPI / XGBoost | `8000` | `GET http://localhost:8000/health` |
 | **Backend API** | Node.js / Express | `4000` | `GET http://localhost:4000/health` |
 | **Merchant Dashboard** | Next.js 14 | `3000` | `http://localhost:3000` |
 
@@ -121,7 +121,7 @@ curl -s http://localhost:4000/metrics
 | `policy_evaluations_total` | Counter | `decision`, `policy_version` | Total Policy Engine evaluations (`ALLOW`, `REQUIRE_APPROVAL`, `BLOCK`). |
 | `policy_evaluation_duration_seconds` | Histogram | `decision` | Pure CPU execution latency of deterministic guardrail rules. |
 | `ml_predictions_total` | Counter | `model`, `fallback` | Total ML recovery scoring inferences and fallback counts. |
-| `ml_prediction_duration_seconds` | Histogram | `model` | Latency distribution of XGBoost / LightGBM scoring calls. |
+| `ml_prediction_duration_seconds` | Histogram | `model` | Latency distribution of XGBoost scoring calls. |
 | `ml_prediction_failures_total` | Counter | `error_type` | Count of ML service timeouts or connection errors triggering fallback. |
 | `agent_invocations_total` | Counter | `agent`, `fallback` | GenAI invocations for `analyst` (Agent 1) vs `executor` (Agent 2). |
 | `agent_invocation_duration_seconds` | Histogram | `agent` | Latency distribution of autonomous agent reasoning. |

@@ -1,0 +1,30 @@
+# Root build context — used by the backend image (docker-compose.yml: context ".", dockerfile backend/Dockerfile).
+# Allow-list: everything at the repository root is excluded unless re-included below.
+# (ml-service, genai-service and frontend build from their own folders and use their own .dockerignore.)
+*
+!package.json
+!package-lock.json
+!backend
+!drizzle
+
+# Local dependencies (installed fresh in the image by `npm ci --omit=dev -w backend`)
+**/node_modules
+
+# Real environment files & secrets (keep only the templates)
+**/.env
+**/.env.*
+!backend/.env.example
+**/*.pem
+**/*.key
+
+# Development-only files
+backend/tests
+**/coverage
+**/.nyc_output
+**/.eslintcache
+**/*.log
+**/*.md
+
+# Docker build files
+backend/Dockerfile
+**/.dockerignore

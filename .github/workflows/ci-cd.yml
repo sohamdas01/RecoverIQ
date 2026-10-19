@@ -1,0 +1,104 @@
+name: RecoverIQ Production CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # -------------------------------------------------------------
+  # Job 1: Test & Lint All Services
+  # -------------------------------------------------------------
+  test-and-verify:
+    name: Test & Build Services
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (v20)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: './package-lock.json'
+
+      - name: Setup Python (3.11)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Backend Unit Tests
+      - name: Install Backend Dependencies
+        working-directory: ./backend
+        run: npm ci
+
+      - name: Run Backend Tests
+        working-directory: ./backend
+        env:
+          NODE_ENV: test
+          JWT_SECRET: test-jwt-secret-key-32-chars-long-abc
+          RECOVERY_LINK_SECRET: test-recovery-link-secret-32-chars-long
+          INTERNAL_SERVICE_TOKEN: test-internal-service-token-32-chars
+          GENAI_INTERNAL_TOKEN: test-internal-service-token-32-chars
+          ML_INTERNAL_TOKEN: test-internal-service-token-32-chars
+        run: node --test tests/ask-recoveriq.test.js tests/activity-feed.test.js
+
+      # ML Service Tests
+      - name: Install ML Service Dependencies
+        working-directory: ./ml-service
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest httpx
+
+      - name: Run ML Service Tests
+        working-directory: ./ml-service
+        run: pytest tests/
+
+      # GenAI Service Tests
+      - name: Install GenAI Service Dependencies
+        working-directory: ./genai-service
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest httpx
+
+      - name: Run GenAI Service Tests
+        working-directory: ./genai-service
+        run: pytest tests/
+
+      # Frontend Production Build Check
+      - name: Install Frontend Dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Build Next.js Frontend
+        working-directory: ./frontend
+        env:
+          NEXT_PUBLIC_BACKEND_URL: http://localhost:4000/api
+        run: npm run build
+
+  # -------------------------------------------------------------
+  # Job 2: Build & Push Docker Images (Run on main push)
+  # -------------------------------------------------------------
+  docker-build-and-push:
+    name: Build & Push Production Images
+    needs: test-and-verify
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Optional: Log in to Amazon ECR or Docker Hub
+      # - name: Configure AWS Credentials
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region: ${{ secrets.AWS_REGION }}

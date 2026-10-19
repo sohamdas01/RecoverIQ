@@ -12,6 +12,7 @@ from agents.schemas import (
     RecoveryAnalystInput,
     RecoveryAnalystOutput,
     RecoveryActionEnum,
+    CustomerHistoryContext,
 )
 from prompts.recovery_analyst import RECOVERY_ANALYST_SYSTEM_PROMPT
 from rag.playbook_retriever import PlaybookRetriever
@@ -73,7 +74,11 @@ class RecoveryAnalystAgent:
             "paymentMethod": tx.paymentMethod,
             "attemptCount": attempt_count,
         }
-        retrieved_strategies = self.retriever.retrieve_strategies(retrieval_query, top_k=2)
+        retrieved_strategies = self.retriever.retrieve_strategies(
+            retrieval_query,
+            top_k=3,
+            min_similarity=0.65
+        )
 
         # 3. Model Inference (Custom Adapter or LLM API or Deterministic Engine)
         raw_output = None
@@ -94,6 +99,18 @@ class RecoveryAnalystAgent:
         latency_ms = int((time.time() - start_time) * 1000)
 
         try:
+            # If playbookSources was omitted in dict output, populate from matched retrieved strategies
+            if isinstance(raw_output, dict) and "playbookSources" not in raw_output:
+                raw_output["playbookSources"] = [
+                    {
+                        "playbookId": s.get("playbook_id") or s.get("rule_code", "PB-GEN"),
+                        "failureType": s.get("failure_type") or s.get("failure_reason"),
+                        "ruleTitle": s.get("title"),
+                        "similarityScore": s.get("similarity_score"),
+                    }
+                    for s in retrieved_strategies[:2]
+                ]
+
             if isinstance(raw_output, RecoveryAnalystOutput):
                 validated_output = raw_output
             else:
@@ -105,6 +122,7 @@ class RecoveryAnalystAgent:
             validated_output.metadata["latencyMs"] = latency_ms
             validated_output.metadata["agentName"] = "RecoveryAnalyst"
             validated_output.metadata["agentVersion"] = "v1.0"
+            validated_output.metadata["retrievedStrategiesCount"] = len(retrieved_strategies)
 
             return validated_output.model_dump()
 
@@ -116,6 +134,7 @@ class RecoveryAnalystAgent:
                 reasonCodes=["OUTPUT_VALIDATION_ERROR"],
                 rationale=f"Model output schema validation failed: {str(validation_err)}",
                 suggestedParameters={"priority": "urgent", "reason": "model_output_invalid"},
+                playbookSources=[],
                 metadata={
                     "agentName": "RecoveryAnalyst",
                     "agentVersion": "v1.0",
@@ -138,6 +157,27 @@ class RecoveryAnalystAgent:
         ml_prob = inp.mlPrediction.probability if inp.mlPrediction else 0.70
         reason = tx.failureReason
 
+        # Helper to construct source attribution
+        def make_sources(default_id: str, default_title: str):
+            if strategies:
+                matched = [s for s in strategies if (s.get("failure_type") == reason or s.get("failure_reason") == reason)]
+                if matched:
+                    return [
+                        {
+                            "playbookId": s.get("playbook_id") or s.get("rule_code", default_id),
+                            "failureType": s.get("failure_type") or s.get("failure_reason", reason),
+                            "ruleTitle": s.get("title", default_title),
+                            "similarityScore": s.get("similarity_score"),
+                        }
+                        for s in matched[:2]
+                    ]
+            return [{
+                "playbookId": default_id,
+                "failureType": reason,
+                "ruleTitle": default_title,
+                "similarityScore": None,
+            }]
+
         # Case 1: High risk fraud
         if reason == "high_risk_fraud" or tx.metadata.get("fraudFlag") is True:
             return {
@@ -146,6 +186,7 @@ class RecoveryAnalystAgent:
                 "reasonCodes": ["HIGH_RISK_FRAUD_FLAGGED", "SECURITY_QUARANTINE"],
                 "rationale": "High-risk fraud indicators present. Suppressing automated retries and escalating to risk operations.",
                 "suggestedParameters": {"priority": "urgent", "channel": "internal_escalation"},
+                "playbookSources": make_sources("PB-11", "High Risk Fraud — Immediate Quarantine & Escalation"),
             }
 
         # Case 2: Card expired
@@ -156,16 +197,20 @@ class RecoveryAnalystAgent:
                 "reasonCodes": ["CARD_EXPIRED_UPDATE_REQUIRED", "SELF_SERVICE_LINK"],
                 "rationale": "Card is expired; direct retries will fail at gateway. Self-service link allows customer to update payment details.",
                 "suggestedParameters": {"channel": "email", "templateId": "card_expired_v1"},
+                "playbookSources": make_sources("PB-04", "Card Expired — Direct Retry Suppression & Self-Service Link"),
             }
 
         # Case 3: Bank outage / Network timeout
         if reason in ("bank_outage", "network_timeout"):
+            rule_id = "PB-06" if reason == "bank_outage" else "PB-08"
+            rule_title = "Bank Outage — Immediate Automated Re-Capture" if reason == "bank_outage" else "Network Timeout — Gateway Status Inquiry & Capture Retry"
             return {
                 "recommendation": RecoveryActionEnum.ATTEMPT_RECOVERY.value,
                 "confidence": 0.90,
                 "reasonCodes": ["TRANSIENT_GATEWAY_OUTAGE", "IMMEDIATE_RETRY_ELIGIBLE"],
                 "rationale": "Transient network or gateway timeout identified. Immediate re-capture has high probability of settlement.",
                 "suggestedParameters": {"paymentId": f"pay_retry_{tx.id or int(time.time())}"},
+                "playbookSources": make_sources(rule_id, rule_title),
             }
 
         # Case 4: Insufficient funds
@@ -177,6 +222,7 @@ class RecoveryAnalystAgent:
                     "reasonCodes": ["MULTI_ATTEMPT_FUNDS_EXHAUSTED", "ALTERNATIVE_PAYMENT_METHOD"],
                     "rationale": "Multiple insufficient funds failures recorded. Proposing customer recovery message with alternate payment options.",
                     "suggestedParameters": {"channel": "email", "templateId": "alternative_payment_methods"},
+                    "playbookSources": make_sources("PB-03", "Insufficient Funds — Multi-Attempt Exhaustion"),
                 }
             return {
                 "recommendation": RecoveryActionEnum.SCHEDULE_RETRY.value,
@@ -184,6 +230,7 @@ class RecoveryAnalystAgent:
                 "reasonCodes": ["INSUFFICIENT_FUNDS_SCHEDULED_WINDOW", "SETTLEMENT_TIMING"],
                 "rationale": "Transient insufficient funds decline. Scheduling retry for standard banking clearing window.",
                 "suggestedParameters": {"retryDelayMinutes": 360},
+                "playbookSources": make_sources("PB-01", "Insufficient Funds — Transient Off-Hours Decline"),
             }
 
         # Case 5: Top RAG strategy fallback
@@ -191,13 +238,21 @@ class RecoveryAnalystAgent:
             top = strategies[0]
             action = top.get("recommended_action", RecoveryActionEnum.SEND_RECOVERY_MESSAGE.value)
             similarity = top.get("similarity_score", 0.85)
-            rule_code = top.get("rule_code", "PB-RAG")
+            rule_code = top.get("playbook_id") or top.get("rule_code", "PB-RAG")
             return {
                 "recommendation": action,
-                "confidence": min(0.95, max(0.70, similarity)),
+                "confidence": min(0.95, max(0.70, similarity if similarity is not None else 0.80)),
                 "reasonCodes": [f"RAG_{rule_code}", "PLAYBOOK_MATCH"],
                 "rationale": f"Playbook match [{rule_code}: {top.get('title')}]: {top.get('rationale')}",
                 "suggestedParameters": top.get("tool_params", {}),
+                "playbookSources": [
+                    {
+                        "playbookId": rule_code,
+                        "failureType": top.get("failure_type") or top.get("failure_reason", reason),
+                        "ruleTitle": top.get("title"),
+                        "similarityScore": top.get("similarity_score"),
+                    }
+                ],
             }
 
         # Default fallback
@@ -207,6 +262,7 @@ class RecoveryAnalystAgent:
             "reasonCodes": ["BASELINE_RECOVERY_HEURISTIC"],
             "rationale": "Standard recovery strategy routing customer to checkout self-service portal.",
             "suggestedParameters": {"channel": "email"},
+            "playbookSources": [],
         }
 
     async def _call_llm(
@@ -215,18 +271,23 @@ class RecoveryAnalystAgent:
         strategies: list
     ) -> Dict[str, Any]:
         """
-        Executes OpenAI Chat Completion with structured JSON output enforcement.
+        Executes OpenAI Chat Completion with clearly separated context sections.
         """
         from openai import AsyncOpenAI
         client = AsyncOpenAI(api_key=self.api_key)
 
-        rag_context = "\n\n".join([
-            f"- Strategy [{s.get('rule_code', 'PB')}]: {s.get('title')}\n"
-            f"  Action: {s.get('recommended_action')}\n"
-            f"  Rationale: {s.get('rationale')}\n"
-            f"  Similarity: {s.get('similarity_score', 0.8):.2f}"
-            for s in strategies
-        ])
+        rag_context_blocks = []
+        for s in strategies:
+            p_id = s.get("playbook_id") or s.get("rule_code", "PB")
+            score_str = f" (Similarity: {s['similarity_score']:.2f})" if s.get("similarity_score") is not None else ""
+            rag_context_blocks.append(
+                f"- Playbook ID [{p_id}]{score_str}: {s.get('title')}\n"
+                f"  Failure Type: {s.get('failure_type') or s.get('failure_reason')}\n"
+                f"  Recommended Strategy: {s.get('recommended_action')}\n"
+                f"  Conditions/Trigger: {s.get('conditions') or s.get('trigger')}\n"
+                f"  Rationale: {s.get('rationale')}"
+            )
+        rag_context = "\n\n".join(rag_context_blocks)
 
         tx = inp.transaction
         hist = inp.customerHistory or CustomerHistoryContext()
@@ -235,24 +296,20 @@ class RecoveryAnalystAgent:
         # Sanitize metadata to avoid prompt injection leakage
         safe_meta = {k: str(v)[:100] for k, v in (tx.metadata or {}).items() if k != "notes"}
 
-        user_content = f"""TRANSACTION DATA:
+        user_content = f"""=== RECOVERY CASE DATA ===
 - Amount: {tx.currency} {tx.amount}
 - Payment Method: {tx.paymentMethod}
 - Failure Reason: {tx.failureReason}
 - Attempt Count: {tx.attemptCount}
+- Customer Prior Successes: {hist.previousSuccesses}
+- Customer Prior Failures: {hist.previousFailures}
+- Prior Recovery Success: {hist.previousRecoverySuccess}
+- ML Recovery Propensity: {f"{ml.probability:.2f}" if ml else "N/A"}
+- ML Reason Codes: {ml.reason_codes if ml else []}
 - Safe Metadata: {json.dumps(safe_meta)}
 
-CUSTOMER HISTORY:
-- Successes: {hist.previousSuccesses}
-- Failures: {hist.previousFailures}
-- Prior Recovery Success: {hist.previousRecoverySuccess}
-
-ML RECOVERY SIGNALS:
-- Probability: {f"{ml.probability:.2f}" if ml else "N/A"}
-- Reason Codes: {ml.reason_codes if ml else []}
-
-RELEVANT PLAYBOOK STRATEGIES (Vector DB):
-{rag_context if rag_context else "None available"}
+=== RETRIEVED PLAYBOOK CONTEXT (Advisory Reference) ===
+{rag_context if rag_context else "No vector playbook matches above relevance threshold."}
 
 Analyze the transaction and return the structured JSON recommendation."""
 

@@ -15,7 +15,7 @@ export class RecoveryExecutorClient {
    * @param {Object} params.transaction Authoritative transaction record
    * @param {Object} params.customer Customer record
    * @param {Object} params.customerStats Customer historical profile
-   * @param {Object} params.mlPrediction ML prediction from LightGBM model
+   * @param {Object} params.mlPrediction ML prediction from XGBoost model
    * @param {Object} params.agent1Recommendation Structured output from Agent 1
    * @param {Object} options Optional client options
    * @returns {Promise<Object>} Validated Agent 2 Action Plan proposal
