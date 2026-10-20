@@ -95,14 +95,9 @@ jobs:
           INTERNAL_SERVICE_TOKEN: test-internal-service-token-32-chars
           GENAI_INTERNAL_TOKEN: test-internal-service-token-32-chars
           ML_INTERNAL_TOKEN: test-internal-service-token-32-chars
-        run: >-
-          node --test
-          tests/config-secrets.test.js
-          tests/merchant-auth-security.test.js
-          tests/tenant-isolation.test.js
-          tests/webhook-security.test.js
-          tests/ask-recoveriq.test.js
-          tests/activity-feed.test.js
+        # Full backend suite. The shell expands the glob (Node 20 does not expand globs itself,
+        # so the `npm test` script pattern tests/**/*.test.js cannot be used here).
+        run: node --test tests/*.test.js
 
       # ML Service Tests
       - name: Install ML Service Dependencies
