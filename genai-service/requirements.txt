@@ -6,3 +6,6 @@ python-dotenv>=1.0.1
 qdrant-client>=1.12.0
 openai>=1.58.0
 numpy>=1.26.0
+
+# Transitive dependency (qdrant-client, openai) pinned to the patched release: 2.7.0 has known advisories (PYSEC-2026-4175, -4176, -4177), fixed in 2.8.0
+urllib3==2.8.0
