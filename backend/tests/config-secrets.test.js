@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import { config, validateProductionConfig, isSimulationEnabled, INSECURE_DEFAULT_SECRETS } from '../services/config/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -157,25 +158,105 @@ describe('Phase 6 — Step 5: Configuration & Secrets Cleanup Test Suite', () =>
       { name: 'GenAI Service .env', path: path.join(rootDir, 'genai-service/.env') },
     ];
 
-    test('3.1 All 5 .env files exist in the repository', () => {
+    // Real .env files are gitignored: they exist on a developer machine but never in a clean checkout (CI).
+    // The checks that need them are skipped only when NONE exist; with any real .env present they run in full.
+    const hasLocalEnvFiles = envPaths.some(({ path: p }) => fs.existsSync(p));
+    const noLocalEnv = !hasLocalEnvFiles && 'no real .env files (gitignored) in this checkout; template checks 3.4-3.6 cover it';
+
+    test('3.1 All 5 .env files exist in the repository', { skip: noLocalEnv }, () => {
       for (const { name, path: filePath } of envPaths) {
         assert.ok(fs.existsSync(filePath), `${name} must exist at ${filePath}`);
       }
     });
 
-    test('3.2 .env files have content configured', () => {
+    test('3.2 .env files have content configured', { skip: noLocalEnv }, () => {
       for (const { name, path: filePath } of envPaths) {
         const content = fs.readFileSync(filePath, 'utf-8');
         assert.ok(content.length > 0, `${name} must not be empty`);
       }
     });
 
-    test('3.3 Frontend .env contains only frontend-relevant public variables', () => {
+    test('3.3 Frontend .env contains only frontend-relevant public variables', { skip: noLocalEnv }, () => {
       const frontendEnvPath = path.join(rootDir, 'frontend/.env');
       const content = fs.readFileSync(frontendEnvPath, 'utf-8');
       assert.ok(content.includes('NEXT_PUBLIC_BACKEND_URL'), 'Frontend env must include NEXT_PUBLIC_BACKEND_URL');
       assert.ok(!content.includes('JWT_SECRET'), 'Frontend env must NOT expose backend JWT_SECRET');
       assert.ok(!content.includes('DATABASE_URL'), 'Frontend env must NOT expose DATABASE_URL');
+    });
+
+    // ---- Checks that run everywhere (clean checkouts included): templates and committed-secret hygiene ----
+    const templatePaths = [
+      { name: 'Root', path: path.join(rootDir, '.env.example') },
+      { name: 'Backend', path: path.join(rootDir, 'backend/.env.example') },
+      { name: 'Frontend', path: path.join(rootDir, 'frontend/.env.example') },
+      { name: 'GenAI Service', path: path.join(rootDir, 'genai-service/.env.example') },
+    ];
+
+    const parseEnv = (content) => content
+      .split(/\r?\n/)
+      .map((line) => line.match(/^([A-Z][A-Z0-9_]*)=(.*)$/))
+      .filter(Boolean)
+      .map(([, key, value]) => ({ key, value: value.trim() }));
+
+    test('3.4 .env.example templates exist, are populated, and the frontend one exposes only public variables', () => {
+      for (const { name, path: filePath } of templatePaths) {
+        assert.ok(fs.existsSync(filePath), `${name} .env.example must exist at ${filePath}`);
+        assert.ok(fs.readFileSync(filePath, 'utf-8').trim().length > 0, `${name} .env.example must not be empty`);
+      }
+      const frontend = parseEnv(fs.readFileSync(path.join(rootDir, 'frontend/.env.example'), 'utf-8'));
+      assert.ok(frontend.some(({ key }) => key === 'NEXT_PUBLIC_BACKEND_URL'), 'Frontend template must define NEXT_PUBLIC_BACKEND_URL');
+      assert.ok(frontend.every(({ key }) => key.startsWith('NEXT_PUBLIC_')), 'Frontend template must contain only NEXT_PUBLIC_* variables');
+    });
+
+    test('3.5 templates contain placeholders only: every secret-like value is a "your_..." placeholder', () => {
+      const secretLike = /(SECRET|TOKEN|PASSWORD|API_KEY|ACCESS_KEY|KEY_ID)/;
+      for (const { name, path: filePath } of templatePaths) {
+        for (const { key, value } of parseEnv(fs.readFileSync(filePath, 'utf-8'))) {
+          if (!secretLike.test(key) || value === '') continue;
+          assert.ok(
+            value.toLowerCase().includes('your_'),
+            `${name} .env.example: ${key} must be a placeholder containing "your_" (a real secret must never be committed)`
+          );
+        }
+      }
+    });
+
+    // High-confidence credential shapes only, so ordinary test fixtures do not trip it
+    const SECRET_SHAPES = [
+      { label: 'private key block', re: /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/ },
+      { label: 'AWS access key id', re: /\bAKIA[0-9A-Z]{16}\b/ },
+      { label: 'OpenAI-style API key', re: /\bsk-(?:proj-)?[A-Za-z0-9]{32,}\b/ },
+      { label: 'Razorpay live key', re: /\brzp_live_[A-Za-z0-9]{14,}\b/ },
+      { label: 'GitHub token', re: /\bgh[pousr]_[A-Za-z0-9]{36,}\b/ },
+    ];
+
+    test('3.6 no real env files or key material are tracked by git, and no credential shapes appear in tracked text files', (t) => {
+      let tracked;
+      try {
+        tracked = execFileSync('git', ['ls-files'], { cwd: rootDir, encoding: 'utf-8', maxBuffer: 64 * 1024 * 1024 })
+          .split('\n')
+          .filter(Boolean);
+      } catch {
+        return t.skip('not a git checkout (git unavailable): tracked-file scan skipped');
+      }
+
+      const realEnv = tracked.filter((f) => /(^|\/)\.env(\.|$)/.test(f) && !f.endsWith('.env.example'));
+      assert.deepStrictEqual(realEnv, [], `real env files must not be committed: ${realEnv.join(', ')}`);
+
+      const keyFiles = tracked.filter((f) => /\.(pem|key|p12|pfx)$/i.test(f));
+      assert.deepStrictEqual(keyFiles, [], `key/certificate files must not be committed: ${keyFiles.join(', ')}`);
+
+      const textExt = /\.(js|mjs|cjs|ts|tsx|jsx|json|py|md|yml|yaml|sql|txt|example|toml|cfg|ini|html|css)$/i;
+      const hits = [];
+      for (const file of tracked.filter((f) => textExt.test(f) && !f.endsWith('package-lock.json'))) {
+        const full = path.join(rootDir, file);
+        if (!fs.existsSync(full) || fs.statSync(full).size > 2 * 1024 * 1024) continue;
+        const content = fs.readFileSync(full, 'utf-8');
+        for (const { label, re } of SECRET_SHAPES) {
+          if (re.test(content)) hits.push(`${file}: ${label}`);
+        }
+      }
+      assert.deepStrictEqual(hits, [], `possible committed credentials:\n${hits.join('\n')}`);
     });
   });
 
