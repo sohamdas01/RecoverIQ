@@ -10,14 +10,14 @@
     "test": "node --test src/lib/safe-redirect.test.mjs"
   },
   "dependencies": {
-    "next": "16.3.3",
+    "next": "16.3.8",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "eslint": "^9",
-    "eslint-config-next": "16.3.3",
+    "eslint-config-next": "16.3.8",
     "tailwindcss": "^4"
   }
 }
