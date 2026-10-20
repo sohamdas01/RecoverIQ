@@ -129,7 +129,8 @@ jobs:
       # Frontend Production Build Check
       - name: Install Frontend Dependencies
         working-directory: ./frontend
-        run: npm ci
+        # Install from frontend/package-lock.json: the root workspace lockfile only records Windows native binaries
+        run: npm ci --workspaces=false
 
       - name: Lint Frontend
         working-directory: ./frontend
