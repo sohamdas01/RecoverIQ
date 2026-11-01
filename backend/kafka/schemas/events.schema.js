@@ -66,7 +66,7 @@ export const PaymentEventSchema = z.object({
     paymentMethod: z.enum(PAYMENT_METHODS, { message: `paymentMethod must be one of: ${PAYMENT_METHODS.join(', ')}` }),
     failureReason: z.enum(FAILURE_REASONS, { message: `failureReason must be one of: ${FAILURE_REASONS.join(', ')}` }),
     attemptCount: z.number().int().min(1, { message: 'attemptCount must be an integer >= 1' }).default(1),
-    metadata: z.record(z.any()).optional().default({}),
+    metadata: z.record(z.string(), z.any()).optional().default({}),
   }),
   version: z.number().int().min(1).default(1),
 });
@@ -91,7 +91,7 @@ export const OutcomeEventSchema = z.object({
   toolName: z.string().optional(),
   recoveredAmount: z.number().min(0).optional(),
   currency: z.string().length(3).optional().default('INR'),
-  details: z.record(z.any()).optional().default({}),
+  details: z.record(z.string(), z.any()).optional().default({}),
   version: z.number().int().min(1).default(1),
 });
 
