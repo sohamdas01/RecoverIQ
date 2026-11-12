@@ -278,6 +278,8 @@ export async function processOutcomeMessage({ topic, partition, message, consume
 
     const isRecovered = event.outcome === OUTCOME_TYPES.RECOVERED || event.eventType === EVENT_TYPES.RECOVERY_COMPLETED;
     const isEscalated = event.outcome === OUTCOME_TYPES.ESCALATED || event.eventType === EVENT_TYPES.RECOVERY_ESCALATED;
+    const isAwaitingCustomer = event.outcome === OUTCOME_TYPES.AWAITING_CUSTOMER;
+    const isClosed = event.outcome === OUTCOME_TYPES.CLOSED;
     const isPendingReview = event.outcome === OUTCOME_TYPES.PENDING_REVIEW;
     const isBlocked = event.outcome === OUTCOME_TYPES.BLOCKED;
     const isScheduled = event.outcome === OUTCOME_TYPES.SCHEDULED || event.eventType === EVENT_TYPES.RECOVERY_SCHEDULED;
@@ -293,6 +295,16 @@ export async function processOutcomeMessage({ topic, partition, message, consume
       newDecisionStatus = 'executed';
       actionStatus = 'success';
       eventTaken = 'escalated';
+    } else if (isAwaitingCustomer) {
+      newTransactionStatus = currentTx.status;
+      newDecisionStatus = 'executed';
+      actionStatus = 'success';
+      eventTaken = 'recovery_link_sent';
+    } else if (isClosed) {
+      newTransactionStatus = 'abandoned';
+      newDecisionStatus = 'executed';
+      actionStatus = 'success';
+      eventTaken = 'recovery_failed';
     } else if (isPendingReview) {
       newTransactionStatus = currentTx.status;
       newDecisionStatus = 'pending_review';

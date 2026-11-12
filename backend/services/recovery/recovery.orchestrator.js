@@ -18,7 +18,7 @@ import { getMLPrediction } from '../ml/index.js';
 import { ObservabilityService, AUDIT_EVENT_TYPES, withSpan } from '../observability/index.js';
 import { createDecision } from '../../db/queries/decisions.queries.js';
 import { createAction, updateActionResult } from '../../db/queries/actions.queries.js';
-import { EVENT_TYPES, OUTCOME_TYPES } from '../../kafka/schemas/events.schema.js';
+import { EVENT_TYPES, OUTCOME_TYPES, classifyToolOutcome } from '../../kafka/schemas/events.schema.js';
 import { logger, updateCorrelationContext } from '../logger/index.js';
 import { metrics } from '../metrics/index.js';
 
@@ -396,15 +396,8 @@ export class RecoveryOrchestrator {
       if (!executionResult.success) {
         outcomeEventType = EVENT_TYPES.RECOVERY_FAILED;
         outcomeStatus = OUTCOME_TYPES.FAILED;
-      } else if (agent2Proposal.proposedAction === 'escalate_to_human') {
-        outcomeEventType = EVENT_TYPES.RECOVERY_ESCALATED;
-        outcomeStatus = OUTCOME_TYPES.ESCALATED;
-      } else if (agent2Proposal.proposedAction === 'schedule_retry') {
-        outcomeEventType = EVENT_TYPES.RECOVERY_SCHEDULED;
-        outcomeStatus = OUTCOME_TYPES.SCHEDULED;
       } else {
-        outcomeEventType = EVENT_TYPES.RECOVERY_COMPLETED;
-        outcomeStatus = OUTCOME_TYPES.RECOVERED;
+        ({ eventType: outcomeEventType, outcome: outcomeStatus } = classifyToolOutcome(agent2Proposal.proposedAction));
       }
 
     } else if (policyResult.decision === POLICY_DECISIONS.REQUIRE_APPROVAL) {

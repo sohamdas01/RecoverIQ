@@ -21,7 +21,25 @@ export const OUTCOME_TYPES = {
   PENDING_REVIEW: 'pending_review',
   REJECTED: 'rejected',
   BLOCKED: 'blocked',
+  AWAITING_CUSTOMER: 'awaiting_customer',
+  CLOSED: 'closed',
 };
+
+const TOOL_OUTCOMES = {
+  attempt_recovery: { eventType: EVENT_TYPES.RECOVERY_COMPLETED, outcome: OUTCOME_TYPES.RECOVERED },
+  send_recovery_message: { eventType: EVENT_TYPES.RECOVERY_SCHEDULED, outcome: OUTCOME_TYPES.AWAITING_CUSTOMER },
+  schedule_retry: { eventType: EVENT_TYPES.RECOVERY_SCHEDULED, outcome: OUTCOME_TYPES.SCHEDULED },
+  escalate_to_human: { eventType: EVENT_TYPES.RECOVERY_ESCALATED, outcome: OUTCOME_TYPES.ESCALATED },
+  log_outcome: { eventType: EVENT_TYPES.RECOVERY_FAILED, outcome: OUTCOME_TYPES.CLOSED },
+};
+
+/**
+ * Classify a tool call that ran successfully. A case is RECOVERED only when money is captured:
+ * a sent payment link stays open until the customer pays, which marks the transaction recovered.
+ */
+export function classifyToolOutcome(toolName) {
+  return TOOL_OUTCOMES[toolName] || { eventType: EVENT_TYPES.RECOVERY_SCHEDULED, outcome: OUTCOME_TYPES.SCHEDULED };
+}
 
 // Supported Failure Reasons
 export const FAILURE_REASONS = [

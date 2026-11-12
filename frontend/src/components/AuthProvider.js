@@ -7,6 +7,7 @@ import {
   getAuthToken,
   getStoredUser,
   login as apiLogin,
+  loginWithGoogle as apiLoginWithGoogle,
   logout as apiLogout,
   setSessionExpiredHandler,
 } from '@/lib/api';
@@ -62,6 +63,12 @@ export function AuthProvider({ children }) {
     return user;
   }, []);
 
+  const loginWithGoogle = useCallback(async (idToken) => {
+    const user = await apiLoginWithGoogle(idToken);
+    setState({ status: 'authenticated', user });
+    return user;
+  }, []);
+
   const logout = useCallback(() => {
     apiLogout();
     setState({ status: 'unauthenticated', user: null });
@@ -71,11 +78,12 @@ export function AuthProvider({ children }) {
     status: state.status,
     user: state.user,
     login,
+    loginWithGoogle,
     logout,
     sessionExpired: state.expired === true,
     canReview: REVIEW_ROLES.includes(state.user?.role),
     isAdmin: state.user?.role === 'admin',
-  }), [state, login, logout]);
+  }), [state, login, loginWithGoogle, logout]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

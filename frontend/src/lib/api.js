@@ -78,15 +78,15 @@ export function clearSession() {
 }
 
 /**
- * Sign in with email + password. Resolves with the user profile; throws AuthError on failure.
+ * Exchange credentials for a session. Resolves with the user profile; throws AuthError on failure.
  */
-export async function login(email, password) {
+async function startSession(path, credentials) {
   let res;
   try {
-    res = await fetch(`${BACKEND_URL}/auth/login`, {
+    res = await fetch(`${BACKEND_URL}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify(credentials),
       cache: 'no-store',
     });
   } catch {
@@ -101,6 +101,14 @@ export async function login(email, password) {
   setAuthToken(body.token);
   setStoredUser(body.user);
   return body.user;
+}
+
+export function login(email, password) {
+  return startSession('/auth/login', { email, password });
+}
+
+export function loginWithGoogle(idToken) {
+  return startSession('/auth/google', { idToken });
 }
 
 export function logout() {
@@ -231,14 +239,13 @@ export async function fetchDashboardSummary() {
 
   const totalCases = cases.length;
 
-  // Pending review cases (status == 'pending_review' or guardrailResult == 'REQUIRE_APPROVAL')
-  const pendingReview = cases.filter(
-    (c) => c.decision?.status === 'pending_review' || c.decision?.guardrailResult === 'REQUIRE_APPROVAL'
-  ).length;
+  // Cases still waiting on a reviewer. A case that needed approval and was since
+  // approved, modified or rejected is no longer pending.
+  const pendingReview = cases.filter((c) => c.decision?.status === 'pending_review').length;
 
   // Blocked or failed cases
   const blockedOrFailed = cases.filter(
-    (c) => c.decision?.status === 'blocked' || c.decision?.guardrailResult === 'BLOCK' || c.decision?.status === 'failed'
+    (c) => c.decision?.status === 'blocked' || c.decision?.status === 'failed'
   ).length;
 
   // Recovered revenue calculation (from transactions with status 'recovered' or executed decisions)

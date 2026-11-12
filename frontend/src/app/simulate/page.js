@@ -2,8 +2,196 @@
 
 import React, { useState } from 'react';
 import Link from 'next/link';
-import { simulatePurchase, simulateBatch } from '../../lib/api';
+import { simulatePurchase, simulateBatch, fetchDecisions, fetchCaseExplanation } from '@/lib/api';
 import AuthGuard from '@/components/AuthGuard';
+import Header from '@/components/Header';
+import { Badge, PolicyBadge } from '@/components/StatusBadge';
+import { actionLabel, formatMoney, humanize, methodLabel, reasonLabel, scoreTone, toScore } from '@/lib/format';
+
+const POLL_INTERVAL_MS = 1500;
+const POLL_TIMEOUT_MS = 45000;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The simulate API only queues the event on Kafka, so the decision is written later by the
+ * recovery consumer. Poll until the case exists and, for an allowed action, the tool has finished.
+ * Returns the latest state seen, or null if no decision appeared before the timeout.
+ */
+async function waitForCase(transactionId) {
+  const deadline = Date.now() + POLL_TIMEOUT_MS;
+  let latest = null;
+
+  while (Date.now() < deadline) {
+    const res = await fetchDecisions(false, 50);
+    const item = (res.data || []).find((c) => c.decision?.transactionId === transactionId);
+
+    if (item) {
+      const explanation = await fetchCaseExplanation(item.decision.id);
+      latest = { item, caseData: explanation.data };
+
+      const toolFinished = latest.caseData?.execution && latest.caseData.execution.status !== 'pending';
+      if (item.decision.status !== 'executed' || toolFinished) return latest;
+    }
+    await sleep(POLL_INTERVAL_MS);
+  }
+  return latest;
+}
+
+/** Shape a finished case into the structure the result panel renders. */
+function toSimulationResult(transaction, { item, caseData }) {
+  const { decision } = item;
+  const analyst = decision.agentAnalystResponse || {};
+  const execution = caseData?.execution;
+
+  return {
+    caseId: decision.id,
+    transaction,
+    decision,
+    score: toScore(decision.mlScore),
+    playbook: caseData?.agent1?.playbookSources?.[0] || null,
+    rationale: caseData?.agent1?.rationale || decision.reasoning,
+    guardrail: {
+      decision: decision.guardrailResult,
+      reason: (caseData?.policy?.reasons || analyst.reasons || []).join(' '),
+      rule: caseData?.policy?.primaryRuleId,
+    },
+    // Held or blocked cases record the tool as 'skipped': it never ran, so there is no result to show
+    executionResult: execution && execution.status !== 'skipped' && {
+      toolName: execution.toolName,
+      success: execution.success,
+      output: execution.result || {},
+    },
+  };
+}
+
+const PRESETS = [
+  {
+    title: 'Card expired',
+    expect: 'Sends a recovery link',
+    tone: 'signal',
+    data: { customerName: 'Aarav Patel', customerEmail: 'aarav.patel@techcorp.in', amount: 2999, paymentMethod: 'card', failureReason: 'card_expired', attemptCount: 1 },
+  },
+  {
+    title: 'Bank outage',
+    expect: 'Retries immediately',
+    tone: 'signal',
+    data: { customerName: 'Ananya Iyer', customerEmail: 'ananya.iyer@gmail.com', amount: 7999, paymentMethod: 'upi', failureReason: 'bank_outage', attemptCount: 1 },
+  },
+  {
+    title: '₹75,000 decline',
+    expect: 'Held for human approval',
+    tone: 'hold',
+    data: { customerName: 'Devika Nair', customerEmail: 'devika.nair@startup.io', amount: 75000, paymentMethod: 'card', failureReason: 'insufficient_funds', attemptCount: 1 },
+  },
+  {
+    title: 'Fraud flag',
+    expect: 'Blocked by the guardrail',
+    tone: 'stop',
+    data: { customerName: 'Suspicious User', customerEmail: 'flagged_user_99@tempmail.com', amount: 95000, paymentMethod: 'card', failureReason: 'high_risk_fraud', attemptCount: 1 },
+  },
+];
+
+const STAGES = ['Event queued', 'Likelihood scored', 'Agents decided', 'Policy checked', 'Action executed'];
+
+const field =
+  'mt-2 w-full rounded-lg border border-line bg-ink px-3.5 py-2.5 text-sm text-paper focus-visible:border-signal focus-visible:outline-none';
+const labelText = 'block text-xs font-medium text-paper/85';
+
+function Progress() {
+  return (
+    <ol className="space-y-4" aria-live="polite">
+      {STAGES.map((stage, i) => (
+        <li key={stage} className="flex items-center gap-3 text-sm text-paper/85">
+          <span
+            aria-hidden="true"
+            className="size-2 rounded-full bg-signal motion-safe:animate-pulse"
+            style={{ animationDelay: `${i * 180}ms` }}
+          />
+          {stage}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function Result({ result }) {
+  const { transaction, decision, score, playbook, guardrail, executionResult } = result;
+  const tone = scoreTone(score);
+  const recoveryUrl = executionResult?.output?.recoveryUrl;
+  const toneText = { signal: 'text-signal', hold: 'text-hold', stop: 'text-stop', muted: 'text-muted' }[tone];
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted">Result</p>
+          <h3 className="mt-2 font-display text-3xl leading-tight tracking-tight text-paper">
+            {formatMoney(transaction?.amount, transaction?.currency)} · {reasonLabel(transaction?.failureReason)}
+          </h3>
+        </div>
+        <PolicyBadge decision={guardrail.decision} />
+      </div>
+
+      <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-line bg-line sm:grid-cols-3">
+        <div className="bg-ink p-4">
+          <dt className="text-xs text-muted">Recovery likelihood</dt>
+          <dd className={`mt-2 font-display text-3xl leading-none ${toneText}`}>{score === null ? '—' : `${Math.round(score * 100)}%`}</dd>
+        </div>
+        <div className="bg-ink p-4">
+          <dt className="text-xs text-muted">Agents chose</dt>
+          <dd className="mt-2 text-sm text-paper">{actionLabel(decision.finalAction || decision.recommendedAction)}</dd>
+        </div>
+        <div className="col-span-2 bg-ink p-4 sm:col-span-1">
+          <dt className="text-xs text-muted">Playbook</dt>
+          <dd className="mt-2 truncate text-sm text-paper" title={playbook?.title}>
+            {playbook ? `${playbook.playbookId || playbook.id} · ${Math.round((playbook.similarityScore ?? playbook.similarity ?? 0) * 100)}% match` : '—'}
+          </dd>
+        </div>
+      </dl>
+
+      {result.rationale && (
+        <blockquote className="border-l-2 border-signal/60 pl-4 text-sm leading-relaxed text-paper/85">{result.rationale}</blockquote>
+      )}
+
+      <div className="rounded-xl border border-line p-4">
+        <p className="text-xs text-muted">Policy engine{guardrail.rule ? ` · ${guardrail.rule}` : ''}</p>
+        <p className="mt-1.5 text-sm text-paper/85">{guardrail.reason || 'No reason recorded.'}</p>
+      </div>
+
+      {executionResult ? (
+        <div className="rounded-xl border border-line p-4">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm text-paper">Ran {actionLabel(executionResult.toolName)}</p>
+            <Badge tone={executionResult.success ? 'signal' : 'stop'}>{executionResult.success ? 'Succeeded' : 'Failed'}</Badge>
+          </div>
+          {executionResult.output?.outcome && (
+            <p className="mt-1.5 text-xs text-muted">Outcome: {humanize(executionResult.output.outcome).toLowerCase()}</p>
+          )}
+          {recoveryUrl && (
+            <Link
+              href={recoveryUrl.replace(/^https?:\/\/[^/]+/, '')}
+              target="_blank"
+              className="mt-4 inline-flex items-center gap-1.5 rounded-full bg-signal px-4 py-2 text-xs font-semibold text-ink hover:bg-paper"
+            >
+              Open the customer&apos;s recovery page ↗
+            </Link>
+          )}
+        </div>
+      ) : (
+        <p className="rounded-xl border border-line p-4 text-sm text-paper/85">
+          {decision.status === 'pending_review'
+            ? 'Nothing ran yet. The case is waiting in the review queue.'
+            : 'Nothing ran. The policy engine stopped this case.'}
+        </p>
+      )}
+
+      <Link href={`/dashboard/cases/${result.caseId}`} className="inline-flex items-center gap-1.5 text-sm text-signal hover:text-paper">
+        Open the full decision trail →
+      </Link>
+    </div>
+  );
+}
 
 function SimulateContent() {
   const [formData, setFormData] = useState({
@@ -18,64 +206,29 @@ function SimulateContent() {
 
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
   const [batchLoading, setBatchLoading] = useState(false);
-
-  const presets = [
-    {
-      label: 'Card Expired (Triggers Recovery Link)',
-      data: {
-        customerName: 'Aarav Patel',
-        customerEmail: 'aarav.patel@techcorp.in',
-        amount: 2999,
-        paymentMethod: 'card',
-        failureReason: 'card_expired',
-        attemptCount: 1,
-      },
-    },
-    {
-      label: 'Bank Outage (Triggers Immediate Retry)',
-      data: {
-        customerName: 'Ananya Iyer',
-        customerEmail: 'ananya.iyer@gmail.com',
-        amount: 7999,
-        paymentMethod: 'upi',
-        failureReason: 'bank_outage',
-        attemptCount: 1,
-      },
-    },
-    {
-      label: 'High Amount ₹75,000 (Requires Human Approval)',
-      data: {
-        customerName: 'Devika Nair',
-        customerEmail: 'devika.nair@startup.io',
-        amount: 75000,
-        paymentMethod: 'card',
-        failureReason: 'insufficient_funds',
-        attemptCount: 1,
-      },
-    },
-    {
-      label: 'Fraud Flag (Triggers Guardrail BLOCK)',
-      data: {
-        customerName: 'Suspicious User',
-        customerEmail: 'flagged_user_99@tempmail.com',
-        amount: 95000,
-        paymentMethod: 'card',
-        failureReason: 'high_risk_fraud',
-        attemptCount: 1,
-      },
-    },
-  ];
+  const [batchNote, setBatchNote] = useState(null);
+  const [activePreset, setActivePreset] = useState(null);
 
   const handleSimulate = async (e) => {
     e?.preventDefault();
     setLoading(true);
     setResult(null);
+    setError(null);
     try {
       const res = await simulatePurchase(formData);
-      setResult(res.data);
+      if (!res.success || !res.data?.transactionId) {
+        throw new Error(res.error || res.data?.message || 'The event was not queued');
+      }
+
+      const finished = await waitForCase(res.data.transactionId);
+      if (!finished) {
+        throw new Error('Event queued, but no decision arrived in time. Check the backend terminal.');
+      }
+      setResult(toSimulationResult(res.data.transaction, finished));
     } catch (err) {
-      alert('Simulation failed: ' + err.message);
+      setError(err.message || 'Simulation failed');
     } finally {
       setLoading(false);
     }
@@ -83,335 +236,163 @@ function SimulateContent() {
 
   const handleBatch = async () => {
     setBatchLoading(true);
+    setBatchNote(null);
     try {
       const res = await simulateBatch();
-      alert(`Batch completed! ${res.processedCount} simulated scenarios processed.`);
+      setBatchNote({ type: 'success', message: `Batch queued: ${res.processedCount ?? 'several'} scenarios. They appear on the overview as the agents finish.` });
     } catch (err) {
-      alert('Batch simulation error: ' + err.message);
+      setBatchNote({ type: 'error', message: `Batch failed: ${err.message}` });
     } finally {
       setBatchLoading(false);
     }
   };
 
+  const update = (key, value) => {
+    setActivePreset(null);
+    setFormData((prev) => ({ ...prev, [key]: value }));
+  };
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 p-6 md:p-12 font-sans">
-      <div className="max-w-6xl mx-auto space-y-8">
-        
-        {/* Navigation & Header */}
-        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-slate-800 pb-6">
-          <div>
-            <div className="flex items-center gap-3">
-              <span className="px-3 py-1 text-xs font-semibold uppercase tracking-wider bg-indigo-600 text-white rounded-full">Phase 1 Demo</span>
-              <h1 className="text-3xl font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-indigo-300">
-                RecoverIQ Simulation Engine
-              </h1>
+    <div className="space-y-6 pb-12">
+      <Header
+        eyebrow="Simulator · admin only"
+        showSimulate={false}
+        title="Trigger a failed payment"
+        subtitle="Send a synthetic decline through the real pipeline: Kafka, the ML model, both agents, the policy engine and the recovery tools."
+      >
+        <button
+          type="button"
+          onClick={handleBatch}
+          disabled={batchLoading}
+          className="rounded-full border border-line px-4 py-2 text-xs font-medium text-paper transition-colors hover:border-paper/60 disabled:opacity-50"
+        >
+          {batchLoading ? 'Queuing…' : 'Run batch'}
+        </button>
+      </Header>
+
+      {batchNote && (
+        <p role="status" className={`rounded-xl px-4 py-3 text-sm ${batchNote.type === 'success' ? 'bg-signal/10 text-signal' : 'bg-stop/10 text-stop'}`}>
+          {batchNote.message}
+        </p>
+      )}
+
+      <section aria-label="Presets">
+        <p className="mb-3 text-xs text-muted">Start from a scenario</p>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {PRESETS.map((p) => {
+            const active = activePreset === p.title;
+            return (
+              <button
+                key={p.title}
+                type="button"
+                aria-pressed={active}
+                onClick={() => {
+                  setActivePreset(p.title);
+                  setFormData((prev) => ({ ...prev, ...p.data }));
+                }}
+                className={`rounded-xl border p-4 text-left transition-colors ${
+                  active ? 'border-signal bg-signal/[0.06]' : 'border-line bg-ink-raised hover:border-muted/60'
+                }`}
+              >
+                <span className="block text-sm font-medium text-paper">{p.title}</span>
+                <span className="mt-1 block text-xs text-muted">{formatMoney(p.data.amount, 'INR')} · {methodLabel(p.data.paymentMethod)}</span>
+                <span className="mt-3 block">
+                  <Badge tone={p.tone}>{p.expect}</Badge>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,26rem)_minmax(0,1fr)]">
+        <section className="rounded-2xl border border-line bg-ink-raised p-6">
+          <h2 className="font-display text-2xl tracking-tight text-paper">Payment details</h2>
+          <form onSubmit={handleSimulate} className="mt-5 space-y-4">
+            <label className="block">
+              <span className={labelText}>Customer name</span>
+              <input type="text" value={formData.customerName} onChange={(e) => update('customerName', e.target.value)} className={field} required />
+            </label>
+            <label className="block">
+              <span className={labelText}>Customer email</span>
+              <input type="email" value={formData.customerEmail} onChange={(e) => update('customerEmail', e.target.value)} className={field} required />
+            </label>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className={labelText}>Amount (₹)</span>
+                <input type="number" min="1" value={formData.amount} onChange={(e) => update('amount', Number(e.target.value))} className={field} required />
+              </label>
+              <label className="block">
+                <span className={labelText}>Attempt</span>
+                <input type="number" min="1" max="10" value={formData.attemptCount} onChange={(e) => update('attemptCount', Number(e.target.value))} className={field} required />
+              </label>
             </div>
-            <p className="text-slate-400 mt-1 text-sm">
-              Trigger payment failure events to test the autonomous two-agent decision loop, guardrails, and customer recovery flow.
-            </p>
-          </div>
+            <label className="block">
+              <span className={labelText}>Payment method</span>
+              <select value={formData.paymentMethod} onChange={(e) => update('paymentMethod', e.target.value)} className={field}>
+                <option value="card">Card</option>
+                <option value="upi">UPI</option>
+                <option value="netbanking">Net banking</option>
+                <option value="subscription_mandate">Subscription mandate</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className={labelText}>Decline reason</span>
+              <select value={formData.failureReason} onChange={(e) => update('failureReason', e.target.value)} className={field}>
+                <option value="card_expired">Card expired</option>
+                <option value="insufficient_funds">Insufficient funds</option>
+                <option value="bank_outage">Bank outage</option>
+                <option value="network_timeout">Network timeout</option>
+                <option value="authentication_failed">Authentication failed (3DS / OTP)</option>
+                <option value="high_risk_fraud">Suspected fraud</option>
+              </select>
+            </label>
 
-          <div className="flex gap-3">
-            <Link
-              href="/dashboard"
-              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-sm font-medium border border-slate-700 transition"
-            >
-              Merchant Dashboard
-            </Link>
             <button
-              onClick={handleBatch}
-              disabled={batchLoading}
-              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-semibold transition disabled:opacity-50"
+              type="submit"
+              disabled={loading}
+              className="mt-2 w-full rounded-full bg-signal py-3 text-sm font-semibold text-ink transition-colors hover:bg-paper disabled:opacity-50"
             >
-              {batchLoading ? 'Generating...' : '⚡ Run Batch Simulation'}
+              {loading ? 'Agents are working…' : 'Send failed payment'}
             </button>
-          </div>
-        </div>
+          </form>
+        </section>
 
-        {/* Quick Presets */}
-        <div>
-          <h2 className="text-xs uppercase tracking-wider font-semibold text-slate-400 mb-3">Quick Failure Presets:</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-            {presets.map((p, idx) => (
-              <button
-                key={idx}
-                onClick={() => setFormData({ ...formData, ...p.data })}
-                className="text-left p-3 rounded-lg bg-slate-900 border border-slate-800 hover:border-indigo-500/50 hover:bg-slate-850 transition text-xs font-medium text-slate-300"
-              >
-                {p.label}
+        <section className="rounded-2xl border border-line bg-ink-raised p-6 sm:p-8" aria-live="polite">
+          {result ? (
+            <Result result={result} />
+          ) : loading ? (
+            <div>
+              <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted">Running</p>
+              <h3 className="mt-2 font-display text-3xl tracking-tight text-paper">Following the payment through the pipeline</h3>
+              <div className="mt-8">
+                <Progress />
+              </div>
+            </div>
+          ) : error ? (
+            <div className="flex h-full min-h-[22rem] flex-col items-center justify-center text-center">
+              <p className="text-sm font-medium text-stop">{error}</p>
+              <button type="button" onClick={handleSimulate} className="mt-4 rounded-full border border-line px-4 py-2 text-xs text-paper hover:border-paper/60">
+                Try again
               </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Main Grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          
-          {/* Form */}
-          <div className="lg:col-span-5 bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-xl">
-            <h2 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
-              Simulate Failed Purchase
-            </h2>
-
-            <form onSubmit={handleSimulate} className="space-y-4 text-sm">
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">Customer Name</label>
-                <input
-                  type="text"
-                  value={formData.customerName}
-                  onChange={(e) => setFormData({ ...formData, customerName: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-indigo-500"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">Customer Email</label>
-                <input
-                  type="email"
-                  value={formData.customerEmail}
-                  onChange={(e) => setFormData({ ...formData, customerEmail: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-indigo-500"
-                  required
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Amount (INR)</label>
-                  <input
-                    type="number"
-                    value={formData.amount}
-                    onChange={(e) => setFormData({ ...formData, amount: Number(e.target.value) })}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-indigo-500"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Attempt Count</label>
-                  <input
-                    type="number"
-                    min="1"
-                    max="10"
-                    value={formData.attemptCount}
-                    onChange={(e) => setFormData({ ...formData, attemptCount: Number(e.target.value) })}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-indigo-500"
-                    required
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">Payment Method</label>
-                <select
-                  value={formData.paymentMethod}
-                  onChange={(e) => setFormData({ ...formData, paymentMethod: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-indigo-500"
-                >
-                  <option value="card">Credit / Debit Card</option>
-                  <option value="upi">UPI (GPay / PhonePe)</option>
-                  <option value="netbanking">Net Banking</option>
-                  <option value="subscription_mandate">Subscription Auto-Debit Mandate</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">Failure Reason</label>
-                <select
-                  value={formData.failureReason}
-                  onChange={(e) => setFormData({ ...formData, failureReason: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-indigo-500"
-                >
-                  <option value="card_expired">card_expired (Card expired on file)</option>
-                  <option value="insufficient_funds">insufficient_funds (Insufficient account balance)</option>
-                  <option value="bank_outage">bank_outage (Issuing bank network downtime)</option>
-                  <option value="network_timeout">network_timeout (Gateway network timeout)</option>
-                  <option value="authentication_failed">authentication_failed (3D Secure / OTP failed)</option>
-                  <option value="high_risk_fraud">high_risk_fraud (Fraud risk flagged)</option>
-                </select>
-              </div>
-
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full py-3 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-500 hover:to-blue-500 text-white font-semibold rounded-lg shadow-lg shadow-indigo-500/20 transition disabled:opacity-50 mt-4"
-              >
-                {loading ? 'Diagnosing & Executing...' : 'Simulate Payment Failure'}
-              </button>
-            </form>
-          </div>
-
-          {/* Realtime Inspection Output */}
-          <div className="lg:col-span-7 space-y-4">
-            {result ? (
-              <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-xl space-y-6">
-                
-                {/* Status Bar */}
-                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-4">
-                  <div>
-                    <span className="text-xs text-slate-500 font-mono">TX ID: {result.transaction?.id}</span>
-                    <h3 className="text-xl font-bold text-white mt-0.5">
-                      ₹{parseFloat(result.transaction?.amount).toLocaleString()} — {result.transaction?.failureReason}
-                    </h3>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`px-3 py-1 text-xs font-bold rounded-full ${
-                        result.guardrail?.decision === 'ALLOW'
-                          ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
-                          : result.guardrail?.decision === 'REQUIRE_APPROVAL'
-                          ? 'bg-amber-950 text-amber-400 border border-amber-800'
-                          : 'bg-rose-950 text-rose-400 border border-rose-800'
-                      }`}
-                    >
-                      Guardrail: {result.guardrail?.decision}
-                    </span>
-
-                    <span className="px-3 py-1 text-xs font-semibold bg-slate-800 text-slate-300 rounded-full border border-slate-700">
-                      Status: {result.decision?.status}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Agent, ML & Guardrail Reasoning */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="p-4 bg-slate-950 rounded-lg border border-slate-800/80 space-y-2.5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs uppercase font-semibold text-indigo-400 tracking-wider">Agent Diagnosis (RAG)</span>
-                      {result.decision?.agentAnalystResponse?.playbookStrategy?.ruleCode && (
-                        <span className="text-[10px] bg-indigo-950 text-indigo-300 border border-indigo-800 px-2 py-0.5 rounded font-mono font-bold">
-                          {result.decision?.agentAnalystResponse?.playbookStrategy?.ruleCode}
-                        </span>
-                      )}
-                    </div>
-
-                    <p className="text-sm font-semibold text-white">Action: {result.decision?.recommendedAction}</p>
-
-                    {/* ML Score & SHAP Reason Codes Card */}
-                    {result.decision?.mlScore !== undefined && result.decision?.mlScore !== null && (
-                      <div className="p-2.5 bg-slate-900 border border-slate-800 rounded-md space-y-1.5">
-                        <div className="flex justify-between items-center text-xs">
-                          <span className="text-slate-300 font-semibold flex items-center gap-1.5">
-                            <span>🤖 ML Recovery Score:</span>
-                            <span
-                              className={`px-2 py-0.5 rounded font-bold font-mono text-[11px] ${
-                                result.decision.mlScore >= 0.70
-                                  ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
-                                  : result.decision.mlScore >= 0.40
-                                  ? 'bg-amber-950 text-amber-400 border border-amber-800'
-                                  : 'bg-rose-950 text-rose-400 border border-rose-800'
-                              }`}
-                            >
-                              {(result.decision.mlScore * 100).toFixed(1)}%
-                            </span>
-                          </span>
-                          <span className="text-[10px] text-slate-500 font-mono">
-                            {result.decision?.agentAnalystResponse?.mlModelVersion || 'v1.0.0'}
-                          </span>
-                        </div>
-
-                        {result.decision?.agentAnalystResponse?.mlReasonCodes?.length > 0 && (
-                          <div className="flex flex-wrap gap-1 pt-0.5">
-                            {result.decision.agentAnalystResponse.mlReasonCodes.map((code, idx) => (
-                              <span
-                                key={idx}
-                                className="text-[10px] bg-indigo-950/70 text-indigo-300 border border-indigo-800/50 px-1.5 py-0.5 rounded font-mono"
-                              >
-                                #{code}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {result.decision?.agentAnalystResponse?.playbookStrategy && (
-                      <div className="p-2.5 bg-slate-900 border border-indigo-900/40 rounded-md text-xs space-y-1">
-                        <div className="flex justify-between items-center text-[11px] text-indigo-300 font-semibold">
-                          <span>📚 Playbook: {result.decision.agentAnalystResponse.playbookStrategy.title}</span>
-                          <span className="font-mono text-indigo-400">
-                            Match: {(result.decision.agentAnalystResponse.playbookStrategy.similarityScore * 100).toFixed(1)}%
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-slate-400 leading-relaxed">
-                          {result.decision.agentAnalystResponse.playbookStrategy.rationale}
-                        </p>
-                      </div>
-                    )}
-
-                    <p className="text-xs text-slate-400 leading-relaxed">{result.decision?.reasoning}</p>
-                  </div>
-
-                  <div className="p-4 bg-slate-950 rounded-lg border border-slate-800/80">
-                    <span className="text-xs uppercase font-semibold text-amber-400 tracking-wider">Guardrail Policy Checks</span>
-                    <p className="text-sm font-semibold text-white mt-1">Decision: {result.guardrail?.decision}</p>
-                    <p className="text-xs text-slate-400 mt-2 leading-relaxed">{result.guardrail?.reason}</p>
-                    <div className="mt-2 flex flex-wrap gap-1">
-                      {result.guardrail?.appliedRules?.map((r, i) => (
-                        <span key={i} className="text-[10px] bg-slate-900 text-slate-400 px-2 py-0.5 rounded font-mono">
-                          {r}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Action Result / Customer Recovery Link */}
-                {result.executionResult && (
-                  <div className="p-4 bg-slate-950 rounded-lg border border-emerald-900/50">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs uppercase font-semibold text-emerald-400 tracking-wider">
-                        MCP Tool Execution: {result.executionResult?.toolName}
-                      </span>
-                      <span className="text-xs text-emerald-400 font-mono font-bold">
-                        {result.executionResult?.success ? 'SUCCESS' : 'FAILED'}
-                      </span>
-                    </div>
-
-                    {result.executionResult?.output?.recoveryUrl && (
-                      <div className="mt-3 p-3 bg-emerald-950/40 border border-emerald-800/60 rounded-lg">
-                        <p className="text-xs font-semibold text-emerald-300">
-                          ✨ Customer Recovery Link Generated (Single-Use, Signed Token):
-                        </p>
-                        <p className="text-xs text-slate-400 break-all font-mono mt-1">
-                          {result.executionResult?.output?.recoveryUrl}
-                        </p>
-                        <div className="mt-3">
-                          <Link
-                            href={result.executionResult?.output?.recoveryUrl.replace('http://localhost:3000', '')}
-                            target="_blank"
-                            className="inline-flex items-center gap-2 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-bold transition"
-                          >
-                            Open Customer Recovery Page ↗
-                          </Link>
-                        </div>
-                      </div>
-                    )}
-
-                    {result.executionResult?.output?.message && (
-                      <p className="text-xs text-slate-300 mt-2">
-                        {result.executionResult.output.message}
-                      </p>
-                    )}
-                  </div>
-                )}
-
-              </div>
-            ) : (
-              <div className="h-full min-h-[380px] flex flex-col items-center justify-center p-8 bg-slate-900/50 border border-dashed border-slate-800 rounded-xl text-center text-slate-500">
-                <span className="text-4xl mb-2">⚡</span>
-                <h3 className="text-base font-semibold text-slate-400">Awaiting Simulation Event</h3>
-                <p className="text-xs max-w-sm mt-1">
-                  Fill out the form on the left or select a preset to trigger a failed transaction and watch the autonomous recovery pipeline execute in real time.
-                </p>
-              </div>
-            )}
-          </div>
-
-        </div>
-
+            </div>
+          ) : (
+            <div className="flex h-full min-h-[22rem] flex-col justify-center">
+              <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted">Waiting</p>
+              <h3 className="mt-2 max-w-md font-display text-3xl leading-tight tracking-tight text-paper">
+                Pick a scenario or fill in the form, then send it.
+              </h3>
+              <ol className="mt-8 grid gap-3 text-sm text-muted sm:grid-cols-2">
+                {STAGES.map((stage, i) => (
+                  <li key={stage} className="flex items-center gap-3">
+                    <span className="font-mono text-[11px] text-paper/60">{String(i + 1).padStart(2, '0')}</span>
+                    {stage}
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
+        </section>
       </div>
     </div>
   );

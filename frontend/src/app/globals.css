@@ -10,6 +10,122 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --font-display: var(--font-instrument-serif);
+
+  --color-ink: #0d0f0b;
+  --color-ink-raised: #151811;
+  --color-line: #2b2f25;
+  --color-paper: #f3efe4;
+  --color-muted: #a7aa99;
+  --color-signal: #c9f26b;
+  --color-hold: #f4b64a;
+  --color-stop: #ff7a63;
+  --color-paper-muted: #6a675b;
+  --color-paper-line: #d8d2c1;
+  --color-signal-deep: #33701e;
+  --color-hold-deep: #8f5500;
+  --color-stop-deep: #b22f1b;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+.ledger-rules {
+  background-image: repeating-linear-gradient(to bottom, transparent 0 63px, rgb(243 239 228 / 0.05) 63px 64px);
+  mask-image: linear-gradient(to bottom, black, transparent 88%);
+}
+
+.case-file-edge {
+  --notch: radial-gradient(circle at 9px 0, transparent 6px, black 6.5px);
+  mask-image: var(--notch), linear-gradient(black, black);
+  mask-size: 18px 10px, 100% calc(100% - 9px);
+  mask-position: 0 100%, 0 0;
+  mask-repeat: repeat-x, no-repeat;
+}
+
+.pipeline-tube {
+  left: 22px;
+}
+
+@media (min-width: 64rem) {
+  .pipeline-tube {
+    left: calc(18rem + 36px);
+  }
+}
+
+.pipe-flow {
+  background-image: repeating-linear-gradient(to bottom, #c9f26b 0 10px, transparent 10px 26px);
+  background-size: 100% 26px;
+  opacity: 0.55;
+  animation: pipe-flow 1.1s linear infinite;
+}
+
+.pipe-packet {
+  box-shadow: 0 0 10px 2px rgb(201 242 107 / 0.7);
+  animation: pipe-packet 9s linear infinite;
+}
+
+@keyframes pipe-flow {
+  to {
+    background-position-y: 26px;
+  }
+}
+
+@keyframes pipe-packet {
+  from {
+    top: -2%;
+  }
+  to {
+    top: 102%;
+  }
+}
+
+@keyframes trace-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes stamp-in {
+  from {
+    opacity: 0;
+    transform: rotate(-7deg) scale(1.5);
+  }
+  to {
+    opacity: 1;
+    transform: rotate(-7deg) scale(1);
+  }
+}
+
+.trace-row {
+  animation: trace-in 320ms ease-out both;
+}
+
+.trace-stamp {
+  transform: rotate(-7deg);
+  animation: stamp-in 260ms cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  .trace-row,
+  .trace-stamp,
+  .pipe-flow {
+    animation: none;
+  }
+
+  .pipe-packet {
+    display: none;
+  }
 }
 
 @media (prefers-color-scheme: dark) {

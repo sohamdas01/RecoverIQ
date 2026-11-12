@@ -1,11 +1,12 @@
 'use client';
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, use } from 'react';
 import Header from '@/components/Header';
 import CasesTable from '@/components/CasesTable';
 import { fetchDecisions } from '@/lib/api';
 
-export default function RecoveryCasesExplorer() {
+export default function RecoveryCasesExplorer({ searchParams }) {
+  const { view } = use(searchParams);
   const [cases, setCases] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -43,8 +44,9 @@ export default function RecoveryCasesExplorer() {
   return (
     <div className="space-y-6 pb-12">
       <Header
-        title="Recovery Cases Explorer"
-        subtitle="Search, filter, and inspect all payment recovery decisions and lifecycle outcomes"
+        eyebrow="Recovery cases"
+        title="Every failed payment, and what happened next"
+        subtitle="Search by customer or case, filter by outcome, and open any case for its full decision trail."
         onRefresh={() => loadData(true)}
         refreshing={refreshing}
       />
@@ -54,8 +56,10 @@ export default function RecoveryCasesExplorer() {
         loading={loading}
         error={error}
         onRetry={() => loadData(true)}
-        showFilters={true}
-        title="All Recovery Cases"
+        showFilters
+        initialView={typeof view === 'string' ? view : 'all'}
+        title="All cases"
+        subtitle="Latest 100 cases, refreshed every 10 seconds."
       />
     </div>
   );

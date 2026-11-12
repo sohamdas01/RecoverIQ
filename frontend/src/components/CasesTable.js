@@ -1,8 +1,29 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import Link from 'next/link';
-import { PolicyBadge, StatusBadge, ActionBadge } from './StatusBadge';
+import { useRouter } from 'next/navigation';
+import { OutcomeBadge, PolicyBadge, ScoreMeter } from './StatusBadge';
+import { actionLabel, deriveOutcome, formatMoney, reasonLabel, relativeTime, shortId, toScore } from '@/lib/format';
+
+const VIEWS = [
+  { key: 'all', label: 'All' },
+  { key: 'review', label: 'Needs review' },
+  { key: 'progress', label: 'In progress' },
+  { key: 'recovered', label: 'Recovered' },
+  { key: 'stopped', label: 'Blocked' },
+];
+
+function viewOf(item) {
+  const { key } = deriveOutcome(item.decision, item.transaction);
+  if (key === 'review' || key === 'escalated') return 'review';
+  if (key === 'blocked' || key === 'failed') return 'stopped';
+  if (key === 'recovered') return 'recovered';
+  return 'progress';
+}
+
+const inputBase =
+  'rounded-full border border-line bg-ink px-3.5 py-2 text-xs text-paper placeholder:text-muted/70 transition-colors hover:border-muted/60 focus-visible:border-signal focus-visible:outline-none';
 
 export default function CasesTable({
   cases = [],
@@ -10,228 +31,185 @@ export default function CasesTable({
   error = null,
   onRetry = null,
   showFilters = true,
-  title = 'Recovery Cases',
+  title = 'Recovery cases',
+  subtitle = null,
+  limit = null,
+  initialView = 'all',
 }) {
-  const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState('ALL');
-  const [policyFilter, setPolicyFilter] = useState('ALL');
+  const router = useRouter();
+  const [search, setSearch] = useState('');
+  const [view, setView] = useState(VIEWS.some((v) => v.key === initialView) ? initialView : 'all');
+  const [policy, setPolicy] = useState('ALL');
 
-  const filteredCases = cases.filter((item) => {
-    const dec = item.decision || {};
-    const txn = item.transaction || {};
-    const cust = item.customer || {};
+  const counts = useMemo(() => {
+    const out = { all: cases.length, review: 0, progress: 0, recovered: 0, stopped: 0 };
+    for (const item of cases) out[viewOf(item)] += 1;
+    return out;
+  }, [cases]);
 
-    const matchesSearch =
-      !searchTerm ||
-      dec.id?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      txn.id?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      txn.failureReason?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      cust.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      cust.email?.toLowerCase().includes(searchTerm.toLowerCase());
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return cases.filter((item) => {
+      const dec = item.decision || {};
+      const txn = item.transaction || {};
+      const cust = item.customer || {};
+      if (showFilters && view !== 'all' && viewOf(item) !== view) return false;
+      if (showFilters && policy !== 'ALL' && (dec.guardrailResult || '').toUpperCase() !== policy) return false;
+      if (!q) return true;
+      return [dec.id, txn.id, txn.failureReason, reasonLabel(txn.failureReason), cust.name, cust.email]
+        .filter(Boolean)
+        .some((field) => String(field).toLowerCase().includes(q));
+    });
+  }, [cases, search, view, policy, showFilters]);
 
-    const matchesStatus =
-      statusFilter === 'ALL' ||
-      (statusFilter === 'PENDING' && (dec.status === 'pending_review' || dec.guardrailResult === 'REQUIRE_APPROVAL')) ||
-      (statusFilter === 'EXECUTED' && (dec.status === 'executed' || dec.status === 'recovered')) ||
-      (statusFilter === 'BLOCKED' && (dec.status === 'blocked' || dec.guardrailResult === 'BLOCK'));
-
-    const matchesPolicy =
-      policyFilter === 'ALL' ||
-      (dec.guardrailResult || '').toUpperCase() === policyFilter;
-
-    return matchesSearch && matchesStatus && matchesPolicy;
-  });
+  const rows = limit ? filtered.slice(0, limit) : filtered;
 
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
-      <div className="p-4 sm:p-6 border-b border-slate-800 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+    <section className="overflow-hidden rounded-2xl border border-line bg-ink-raised">
+      <div className="flex flex-col gap-4 px-6 pt-5 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <h2 className="text-lg font-bold text-white tracking-tight flex items-center gap-2">
-            {title}
-            <span className="text-xs font-mono font-medium px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">
-              {filteredCases.length}
-            </span>
-          </h2>
-          <p className="text-xs text-slate-400 mt-0.5">
-            Real-time multi-agent recovery lifecycle & policy decision audit trail
-          </p>
+          <h2 className="font-display text-2xl tracking-tight text-paper">{title}</h2>
+          {subtitle && <p className="mt-1 text-xs text-muted">{subtitle}</p>}
         </div>
-
         {showFilters && (
-          <div className="flex flex-wrap items-center gap-2.5">
-            <div className="relative min-w-[200px]">
-              <input
-                type="text"
-                placeholder="Search case, txn, customer..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-950 border border-slate-800 rounded-xl text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition"
-              />
-              <svg className="w-4 h-4 text-slate-500 absolute left-2.5 top-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="relative">
+              <span className="sr-only">Search cases</span>
+              <svg className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
               </svg>
-            </div>
-
-            <select
-              value={policyFilter}
-              onChange={(e) => setPolicyFilter(e.target.value)}
-              className="px-2.5 py-1.5 text-xs bg-slate-950 border border-slate-800 rounded-xl text-slate-300 focus:outline-none focus:border-indigo-500"
-            >
-              <option value="ALL">Policy: All</option>
-              <option value="ALLOW">Policy: ALLOW</option>
-              <option value="REQUIRE_APPROVAL">Policy: REQUIRE APPROVAL</option>
-              <option value="BLOCK">Policy: BLOCK</option>
-            </select>
-
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className="px-2.5 py-1.5 text-xs bg-slate-950 border border-slate-800 rounded-xl text-slate-300 focus:outline-none focus:border-indigo-500"
-            >
-              <option value="ALL">Status: All</option>
-              <option value="PENDING">Pending Review</option>
-              <option value="EXECUTED">Executed / Recovered</option>
-              <option value="BLOCKED">Blocked</option>
-            </select>
+              <input
+                type="search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search customer, case or reason"
+                className={`${inputBase} w-64 max-w-full pl-8`}
+              />
+            </label>
+            <label>
+              <span className="sr-only">Policy verdict</span>
+              <select value={policy} onChange={(e) => setPolicy(e.target.value)} className={`${inputBase} pr-8`}>
+                <option value="ALL">Any policy verdict</option>
+                <option value="ALLOW">Allowed</option>
+                <option value="REQUIRE_APPROVAL">Needed approval</option>
+                <option value="BLOCK">Blocked</option>
+              </select>
+            </label>
           </div>
         )}
       </div>
 
-      {loading && (
-        <div className="p-12 text-center">
-          <div className="inline-block w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mb-3" />
-          <p className="text-sm text-slate-400">Fetching live recovery cases...</p>
+      {showFilters ? (
+        <div role="tablist" aria-label="Filter by outcome" className="mt-4 flex gap-1 overflow-x-auto border-b border-line px-4">
+          {VIEWS.map((v) => {
+            const active = view === v.key;
+            return (
+              <button
+                key={v.key}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setView(v.key)}
+                className={`relative flex shrink-0 items-center gap-2 px-3 pb-3 pt-1 text-sm transition-colors ${
+                  active ? 'text-paper' : 'text-muted hover:text-paper'
+                }`}
+              >
+                {v.label}
+                <span className={`rounded-full px-1.5 font-mono text-[11px] tabular-nums ${active ? 'bg-paper/10 text-paper' : 'text-muted'}`}>
+                  {counts[v.key]}
+                </span>
+                {active && <span aria-hidden="true" className="absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-signal" />}
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="mt-5 border-b border-line" />
+      )}
+
+      {loading && cases.length === 0 && (
+        <div className="space-y-px" aria-busy="true">
+          {[0, 1, 2, 3, 4].map((i) => (
+            <div key={i} className="mx-6 my-3 h-10 animate-pulse rounded-lg bg-line/40" />
+          ))}
         </div>
       )}
 
-      {!loading && error && (
-        <div className="p-8 text-center bg-rose-500/5 border-b border-rose-500/20">
-          <p className="text-sm font-semibold text-rose-300">Unable to load recovery cases</p>
-          <p className="text-xs text-slate-400 mt-1">{error}</p>
+      {!loading && error && cases.length === 0 && (
+        <div className="px-6 py-12 text-center">
+          <p className="text-sm font-medium text-stop">Unable to load recovery cases</p>
+          <p className="mt-1 text-xs text-muted">{error}</p>
           {onRetry && (
-            <button
-              onClick={onRetry}
-              className="mt-4 px-3.5 py-1.5 text-xs font-semibold text-white bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 transition"
-            >
-              Try Again
+            <button type="button" onClick={onRetry} className="mt-4 rounded-full border border-line px-4 py-1.5 text-xs text-paper hover:border-paper/60">
+              Try again
             </button>
           )}
         </div>
       )}
 
-      {!loading && !error && filteredCases.length === 0 && (
-        <div className="p-12 text-center">
-          <p className="text-sm font-semibold text-slate-300">No recovery cases found</p>
-          <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
-            Trigger failed transactions via the simulator to see autonomous recovery cases in action.
+      {!loading && !error && rows.length === 0 && (
+        <div className="px-6 py-14 text-center">
+          <p className="text-sm font-medium text-paper">{cases.length ? 'No cases match these filters' : 'No recovery cases yet'}</p>
+          <p className="mx-auto mt-1 max-w-sm text-xs text-muted">
+            {cases.length ? 'Try a different search or outcome.' : 'Simulate a failed payment to see the agents open a case.'}
           </p>
-          <div className="mt-4">
-            <Link
-              href="/simulate"
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-indigo-300 bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30 rounded-xl transition"
-            >
-              <span>⚡ Simulate Failed Payment</span>
-            </Link>
-          </div>
         </div>
       )}
 
-      {!loading && !error && filteredCases.length > 0 && (
+      {rows.length > 0 && (
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs text-slate-300">
-            <thead className="bg-slate-950/60 text-slate-400 uppercase tracking-wider font-semibold border-b border-slate-800 text-[11px]">
-              <tr>
-                <th className="py-3.5 px-4 font-mono">Case / Txn ID</th>
-                <th className="py-3.5 px-4">Amount</th>
-                <th className="py-3.5 px-4">Failure Reason</th>
-                <th className="py-3.5 px-4">ML Prob</th>
-                <th className="py-3.5 px-4">Action</th>
-                <th className="py-3.5 px-4">Policy</th>
-                <th className="py-3.5 px-4">Status</th>
-                <th className="py-3.5 px-4">Created</th>
-                <th className="py-3.5 px-4 text-right">Details</th>
+          <table className="w-full min-w-[760px] text-left text-sm">
+            <thead>
+              <tr className="text-[11px] uppercase tracking-[0.12em] text-muted">
+                <th scope="col" className="py-3 pl-6 pr-4 font-medium">Customer</th>
+                <th scope="col" className="px-4 py-3 text-right font-medium">Amount</th>
+                <th scope="col" className="px-4 py-3 font-medium">Failure</th>
+                <th scope="col" className="px-4 py-3 font-medium">Likelihood</th>
+                <th scope="col" className="px-4 py-3 font-medium">Action</th>
+                {showFilters && <th scope="col" className="px-4 py-3 font-medium">Policy</th>}
+                <th scope="col" className="px-4 py-3 font-medium">Outcome</th>
+                <th scope="col" className="py-3 pl-4 pr-6 text-right font-medium">When</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-800/60">
-              {filteredCases.map((item) => {
+            <tbody className="divide-y divide-line border-t border-line">
+              {rows.map((item) => {
                 const dec = item.decision || {};
                 const txn = item.transaction || {};
                 const cust = item.customer || {};
-
-                const amount = parseFloat(txn.amount || 0);
-                const currency = txn.currency || 'USD';
-                const formattedAmount = new Intl.NumberFormat('en-US', {
-                  style: 'currency',
-                  currency,
-                }).format(amount);
-
-                const mlScore = dec.mlScore !== null && dec.mlScore !== undefined ? parseFloat(dec.mlScore) : null;
-                const createdAt = dec.createdAt ? new Date(dec.createdAt).toLocaleTimeString() : '-';
-
+                const href = `/dashboard/cases/${dec.id}`;
                 return (
                   <tr
                     key={dec.id || txn.id}
-                    className="hover:bg-slate-800/40 transition group"
+                    onClick={(e) => {
+                      if (e.target.closest('a')) return;
+                      router.push(href);
+                    }}
+                    className="group cursor-pointer transition-colors hover:bg-paper/[0.03]"
                   >
-                    <td className="py-3.5 px-4 font-mono">
-                      <div className="font-semibold text-slate-200 group-hover:text-indigo-300 transition">
-                        {dec.id ? `${dec.id.slice(0, 8)}...` : 'N/A'}
-                      </div>
-                      <div className="text-[10px] text-slate-500 truncate max-w-[120px]">
-                        {txn.id || '-'}
-                      </div>
-                    </td>
-
-                    <td className="py-3.5 px-4">
-                      <span className="font-bold text-white">{formattedAmount}</span>
-                      {cust.name && (
-                        <div className="text-[10px] text-slate-400 truncate max-w-[120px]">
-                          {cust.name}
-                        </div>
-                      )}
-                    </td>
-
-                    <td className="py-3.5 px-4">
-                      <span className="font-mono text-[11px] text-slate-300 px-2 py-0.5 rounded bg-slate-950 border border-slate-800">
-                        {txn.failureReason || 'unknown'}
-                      </span>
-                    </td>
-
-                    <td className="py-3.5 px-4">
-                      {mlScore !== null ? (
-                        <div className="flex items-center gap-1.5">
-                          <span className={`font-mono font-bold ${mlScore >= 0.7 ? 'text-emerald-400' : mlScore >= 0.4 ? 'text-amber-400' : 'text-rose-400'}`}>
-                            {(dec.mlScore * 100).toFixed(0)}%
-                          </span>
-                        </div>
-                      ) : (
-                        <span className="text-slate-500">-</span>
-                      )}
-                    </td>
-
-                    <td className="py-3.5 px-4">
-                      <ActionBadge action={dec.finalAction || dec.recommendedAction} />
-                    </td>
-
-                    <td className="py-3.5 px-4">
-                      <PolicyBadge decision={dec.guardrailResult} />
-                    </td>
-
-                    <td className="py-3.5 px-4">
-                      <StatusBadge status={dec.status} />
-                    </td>
-
-                    <td className="py-3.5 px-4 text-slate-400 font-mono text-[11px]">
-                      {createdAt}
-                    </td>
-
-                    <td className="py-3.5 px-4 text-right">
-                      <Link
-                        href={`/dashboard/cases/${dec.id}`}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-indigo-400 hover:text-white bg-indigo-500/10 hover:bg-indigo-600 border border-indigo-500/20 rounded-lg transition"
-                      >
-                        <span>View</span>
+                    <td className="py-3.5 pl-6 pr-4">
+                      <Link href={href} className="block max-w-[14rem] truncate text-paper group-hover:text-signal focus-visible:text-signal focus-visible:outline-none">
+                        {cust.name || 'Unknown customer'}
                       </Link>
+                      <span className="font-mono text-[11px] text-muted">{shortId(dec.id)}</span>
+                    </td>
+                    <td className="px-4 py-3.5 text-right font-mono text-[13px] tabular-nums text-paper">
+                      {formatMoney(txn.amount, txn.currency)}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-3.5 text-paper/85">{reasonLabel(txn.failureReason)}</td>
+                    <td className="px-4 py-3.5">
+                      <ScoreMeter score={toScore(dec.mlScore)} />
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-3.5 text-paper/85">{actionLabel(dec.finalAction || dec.recommendedAction)}</td>
+                    {showFilters && (
+                      <td className="px-4 py-3.5">
+                        <PolicyBadge decision={dec.guardrailResult} />
+                      </td>
+                    )}
+                    <td className="px-4 py-3.5">
+                      <OutcomeBadge decision={dec} transaction={txn} />
+                    </td>
+                    <td className="whitespace-nowrap py-3.5 pl-4 pr-6 text-right text-xs text-muted" title={dec.createdAt ? new Date(dec.createdAt).toLocaleString('en-IN') : undefined}>
+                      {relativeTime(dec.createdAt)}
                     </td>
                   </tr>
                 );
@@ -240,6 +218,19 @@ export default function CasesTable({
           </table>
         </div>
       )}
-    </div>
+
+      {rows.length > 0 && (
+        <div className="flex items-center justify-between border-t border-line px-6 py-3 text-xs text-muted">
+          <span>
+            Showing <span className="text-paper">{rows.length}</span> of {filtered.length}
+          </span>
+          {limit && filtered.length > limit && (
+            <Link href="/dashboard/cases" className="font-medium text-signal hover:text-paper">
+              View all cases →
+            </Link>
+          )}
+        </div>
+      )}
+    </section>
   );
 }

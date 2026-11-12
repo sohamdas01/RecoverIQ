@@ -248,7 +248,7 @@ export class AskRecoverIQService {
         const txn = item.transaction || {};
         const amt = parseFloat(txn.amount || 0);
 
-        if (dec.status === 'recovered' || dec.status === 'executed') {
+        if (txn.status === 'recovered') {
           totalRecovered += amt;
           completedCount++;
         }
