@@ -23,7 +23,7 @@ import { RecoveryExecutorClient } from '../agents/recovery-executor.client.js';
 import { executeTool } from '../tools/index.js';
 import { acquireLock, releaseLock } from '../../redis/redis.client.js';
 import { publishOutcomeEvent } from '../../kafka/producer.js';
-import { EVENT_TYPES, OUTCOME_TYPES } from '../../kafka/schemas/events.schema.js';
+import { EVENT_TYPES, OUTCOME_TYPES, classifyToolOutcome } from '../../kafka/schemas/events.schema.js';
 import { ObservabilityService, AUDIT_EVENT_TYPES, withSpan } from '../observability/index.js';
 import { resolveScope } from '../auth/tenant-scope.js';
 import { db } from '../../db/index.js';
@@ -236,15 +236,8 @@ export class ReviewService {
         if (!executionResult.success) {
           outcomeEventType = EVENT_TYPES.RECOVERY_FAILED;
           outcomeStatus = OUTCOME_TYPES.FAILED;
-        } else if (actionToExecute === 'escalate_to_human') {
-          outcomeEventType = EVENT_TYPES.RECOVERY_ESCALATED;
-          outcomeStatus = OUTCOME_TYPES.ESCALATED;
-        } else if (actionToExecute === 'schedule_retry') {
-          outcomeEventType = EVENT_TYPES.RECOVERY_SCHEDULED;
-          outcomeStatus = OUTCOME_TYPES.SCHEDULED;
         } else {
-          outcomeEventType = EVENT_TYPES.RECOVERY_COMPLETED;
-          outcomeStatus = OUTCOME_TYPES.RECOVERED;
+          ({ eventType: outcomeEventType, outcome: outcomeStatus } = classifyToolOutcome(actionToExecute));
         }
       } else if (policyResult.decision === POLICY_DECISIONS.REQUIRE_APPROVAL) {
         // Still requires higher sign-off or unresolvable approval
@@ -514,15 +507,8 @@ export class ReviewService {
         if (!executionResult.success) {
           outcomeEventType = EVENT_TYPES.RECOVERY_FAILED;
           outcomeStatus = OUTCOME_TYPES.FAILED;
-        } else if (targetAction === 'escalate_to_human') {
-          outcomeEventType = EVENT_TYPES.RECOVERY_ESCALATED;
-          outcomeStatus = OUTCOME_TYPES.ESCALATED;
-        } else if (targetAction === 'schedule_retry') {
-          outcomeEventType = EVENT_TYPES.RECOVERY_SCHEDULED;
-          outcomeStatus = OUTCOME_TYPES.SCHEDULED;
         } else {
-          outcomeEventType = EVENT_TYPES.RECOVERY_COMPLETED;
-          outcomeStatus = OUTCOME_TYPES.RECOVERED;
+          ({ eventType: outcomeEventType, outcome: outcomeStatus } = classifyToolOutcome(targetAction));
         }
       } else if (policyResult.decision === POLICY_DECISIONS.REQUIRE_APPROVAL) {
         finalStatus = 'pending_review';

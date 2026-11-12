@@ -2,227 +2,150 @@
 
 import React, { useState } from 'react';
 import Link from 'next/link';
-import { PolicyBadge, ActionBadge } from './StatusBadge';
+import { ScoreMeter } from './StatusBadge';
 import { approveCase, rejectCase } from '@/lib/api';
 import { useAuth } from '@/components/AuthProvider';
+import { actionLabel, formatMoney, isAwaitingReview, reasonLabel, relativeTime, shortId, toScore } from '@/lib/format';
 
-export default function PendingReviewQueue({
-  cases = [],
-  loading = false,
-  onActionComplete = null,
-}) {
+export default function PendingReviewQueue({ cases = [], loading = false, onActionComplete = null, limit = 5 }) {
   const [processingId, setProcessingId] = useState(null);
-  const { canReview } = useAuth();
   const [feedback, setFeedback] = useState(null);
+  const { canReview } = useAuth();
 
-  // Filter only pending review cases
-  const pendingCases = cases.filter((item) => {
-    const dec = item.decision || {};
-    return dec.status === 'pending_review' || dec.guardrailResult === 'REQUIRE_APPROVAL';
-  });
+  const pendingCases = cases.filter((item) => isAwaitingReview(item.decision));
+  const visible = pendingCases.slice(0, limit);
 
-  const handleQuickApprove = async (e, caseId) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (!confirm(`Quick approve recovery case ${caseId.slice(0, 8)}?`)) return;
-
+  const run = async (caseId, fn, successMessage) => {
     setProcessingId(caseId);
     setFeedback(null);
     try {
-      const res = await approveCase(caseId, 'Quick approved from Dashboard Queue');
+      const res = await fn();
       if (res.success) {
-        setFeedback({ type: 'success', message: `Case ${caseId.slice(0, 8)} approved and dispatched!` });
-        if (onActionComplete) onActionComplete();
+        setFeedback({ type: 'success', message: successMessage });
+        onActionComplete?.();
       } else {
-        setFeedback({ type: 'error', message: res.error || 'Failed to approve case' });
+        setFeedback({ type: 'error', message: res.error || res.message || 'The review could not be saved.' });
       }
     } catch (err) {
-      setFeedback({ type: 'error', message: err.message || 'Approval error' });
+      setFeedback({ type: 'error', message: err.message || 'The review could not be saved.' });
     } finally {
       setProcessingId(null);
     }
   };
 
-  const handleQuickReject = async (e, caseId) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const reason = prompt(`Enter rejection reason for case ${caseId.slice(0, 8)}:`, 'Rejected by merchant reviewer');
+  const handleApprove = (caseId) => {
+    if (!confirm(`Approve recovery case ${shortId(caseId)}? The proposed action runs immediately.`)) return;
+    run(caseId, () => approveCase(caseId, 'Approved from the overview review queue'), `Case ${shortId(caseId)} approved and dispatched.`);
+  };
+
+  const handleReject = (caseId) => {
+    const reason = prompt(`Why are you rejecting case ${shortId(caseId)}?`, 'Rejected by merchant reviewer');
     if (reason === null) return;
-
-    setProcessingId(caseId);
-    setFeedback(null);
-    try {
-      const res = await rejectCase(caseId, reason || 'Rejected by merchant');
-      if (res.success) {
-        setFeedback({ type: 'success', message: `Case ${caseId.slice(0, 8)} rejected.` });
-        if (onActionComplete) onActionComplete();
-      } else {
-        setFeedback({ type: 'error', message: res.error || 'Failed to reject case' });
-      }
-    } catch (err) {
-      setFeedback({ type: 'error', message: err.message || 'Rejection error' });
-    } finally {
-      setProcessingId(null);
-    }
+    run(caseId, () => rejectCase(caseId, reason || 'Rejected by merchant'), `Case ${shortId(caseId)} rejected. No action will be taken.`);
   };
-
-  if (pendingCases.length === 0 && !loading) {
-    return null; // Banner in page handles zero cases or quiet state
-  }
 
   return (
-    <div className="bg-slate-900 border border-amber-500/30 rounded-2xl overflow-hidden shadow-xl shadow-amber-950/10">
-      {/* Header */}
-      <div className="p-4 sm:p-6 border-b border-slate-800 bg-amber-950/10 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-300 flex items-center justify-center font-bold text-lg animate-pulse">
-            ⚠
-          </div>
-          <div>
-            <h2 className="text-lg font-bold text-amber-200 tracking-tight flex items-center gap-2">
-              Human-in-the-Loop Review Queue
-              <span className="text-xs font-mono font-medium px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40">
-                {pendingCases.length} awaiting approval
+    <section className="flex h-full flex-col overflow-hidden rounded-2xl border border-line bg-ink-raised">
+      <div className="flex items-start justify-between gap-4 border-b border-line px-6 py-5">
+        <div>
+          <h2 className="flex items-center gap-3 font-display text-2xl tracking-tight text-paper">
+            Needs your review
+            {pendingCases.length > 0 && (
+              <span className="rounded-full bg-hold px-2 py-0.5 font-sans text-xs font-semibold tabular-nums text-ink">
+                {pendingCases.length}
               </span>
-            </h2>
-            <p className="text-xs text-slate-300 mt-0.5">
-              High-value or sensitive transactions gated by Policy Engine requiring merchant authorization
-            </p>
-          </div>
+            )}
+          </h2>
+          <p className="mt-1 text-xs text-muted">High-value or sensitive cases the policy engine held for a person to decide.</p>
         </div>
-
-        <Link
-          href="/dashboard/cases"
-          className="text-xs font-semibold text-amber-400 hover:text-amber-300 transition flex items-center gap-1 self-end sm:self-auto"
-        >
-          <span>View all in cases</span>
-          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
+        {pendingCases.length > limit && (
+          <Link href="/dashboard/cases?view=review" className="shrink-0 text-xs font-medium text-signal hover:text-paper">
+            View all
+          </Link>
+        )}
       </div>
 
-      {/* Action Feedback Banner */}
       {feedback && (
         <div
-          className={`p-3.5 mx-4 sm:mx-6 my-3 rounded-xl border flex items-center justify-between text-xs ${
-            feedback.type === 'success'
-              ? 'bg-emerald-950/40 border-emerald-800/60 text-emerald-300'
-              : 'bg-rose-950/40 border-rose-800/60 text-rose-300'
+          role="status"
+          className={`mx-6 mt-4 flex items-center justify-between gap-3 rounded-lg px-3.5 py-2.5 text-xs ${
+            feedback.type === 'success' ? 'bg-signal/10 text-signal' : 'bg-stop/10 text-stop'
           }`}
         >
           <span>{feedback.message}</span>
-          <button onClick={() => setFeedback(null)} className="text-slate-400 hover:text-white ml-3 font-bold">✕</button>
+          <button type="button" onClick={() => setFeedback(null)} aria-label="Dismiss" className="text-base leading-none text-muted hover:text-paper">
+            ×
+          </button>
         </div>
       )}
 
-      {/* Table */}
-      <div className="overflow-x-auto">
-        <table className="w-full text-left text-xs text-slate-300">
-          <thead className="bg-slate-950/70 text-slate-400 uppercase tracking-wider font-semibold border-b border-slate-800 text-[11px]">
-            <tr>
-              <th className="py-3 px-4 font-mono">Case ID</th>
-              <th className="py-3 px-4">Amount</th>
-              <th className="py-3 px-4">Failure Reason</th>
-              <th className="py-3 px-4">ML Prob</th>
-              <th className="py-3 px-4">Recommended Action</th>
-              <th className="py-3 px-4">Policy Trigger</th>
-              <th className="py-3 px-4 text-right">Review Action</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-800/60">
-            {pendingCases.map((item) => {
-              const dec = item.decision || {};
-              const txn = item.transaction || {};
-              const cust = item.customer || {};
-              const isProcessing = processingId === dec.id;
-
-              const amount = parseFloat(txn.amount || 0);
-              const currency = txn.currency || 'USD';
-              const formattedAmount = new Intl.NumberFormat('en-US', {
-                style: 'currency',
-                currency,
-              }).format(amount);
-
-              const mlScore = dec.mlScore !== null && dec.mlScore !== undefined ? parseFloat(dec.mlScore) : null;
-
-              return (
-                <tr
-                  key={dec.id}
-                  className="hover:bg-amber-950/10 transition group"
-                >
-                  <td className="py-3.5 px-4 font-mono">
+      {loading && pendingCases.length === 0 ? (
+        <div className="space-y-px p-6" aria-busy="true">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="h-14 animate-pulse rounded-lg bg-line/40" />
+          ))}
+        </div>
+      ) : pendingCases.length === 0 ? (
+        <div className="flex flex-1 flex-col items-center justify-center px-6 py-14 text-center">
+          <span aria-hidden="true" className="flex size-10 items-center justify-center rounded-full bg-signal/10 text-signal">
+            <svg className="size-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            </svg>
+          </span>
+          <p className="mt-4 text-sm font-medium text-paper">Queue is clear</p>
+          <p className="mt-1 max-w-xs text-xs text-muted">Every held case has a decision. New ones appear here the moment the policy engine holds them.</p>
+        </div>
+      ) : (
+        <ul className="divide-y divide-line">
+          {visible.map((item) => {
+            const dec = item.decision || {};
+            const txn = item.transaction || {};
+            const busy = processingId === dec.id;
+            return (
+              <li key={dec.id} className="group relative flex flex-col gap-3 px-6 py-4 transition-colors hover:bg-paper/[0.02] sm:flex-row sm:items-center">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-baseline gap-3">
                     <Link
                       href={`/dashboard/cases/${dec.id}`}
-                      className="font-semibold text-amber-300 hover:underline"
+                      className="font-display text-2xl leading-none tracking-tight text-paper after:absolute after:inset-0 hover:text-signal focus-visible:outline-none"
                     >
-                      {dec.id ? `${dec.id.slice(0, 8)}...` : 'N/A'}
+                      {formatMoney(txn.amount, txn.currency)}
                     </Link>
-                    <div className="text-[10px] text-slate-500 truncate max-w-[120px]">
-                      {cust.name || txn.id}
-                    </div>
-                  </td>
+                    <span className="truncate text-sm text-paper/85">{item.customer?.name || 'Unknown customer'}</span>
+                  </div>
+                  <p className="mt-1.5 truncate text-xs text-muted">
+                    {reasonLabel(txn.failureReason)} · proposes <span className="text-paper/85">{actionLabel(dec.recommendedAction)}</span> ·{' '}
+                    {relativeTime(dec.createdAt)}
+                  </p>
+                </div>
 
-                  <td className="py-3.5 px-4 font-bold text-white">
-                    {formattedAmount}
-                  </td>
+                <ScoreMeter score={toScore(dec.mlScore)} className="relative shrink-0" />
 
-                  <td className="py-3.5 px-4">
-                    <span className="font-mono text-[11px] text-rose-300 bg-rose-950/40 px-2 py-0.5 rounded border border-rose-900/40">
-                      {txn.failureReason || 'unknown'}
-                    </span>
-                  </td>
-
-                  <td className="py-3.5 px-4 font-mono">
-                    {mlScore !== null ? (
-                      <span className={`font-bold ${mlScore >= 0.7 ? 'text-emerald-400' : mlScore >= 0.4 ? 'text-amber-400' : 'text-rose-400'}`}>
-                        {(mlScore * 100).toFixed(0)}%
-                      </span>
-                    ) : '-'}
-                  </td>
-
-                  <td className="py-3.5 px-4">
-                    <ActionBadge action={dec.recommendedAction} />
-                  </td>
-
-                  <td className="py-3.5 px-4">
-                    <PolicyBadge decision="REQUIRE_APPROVAL" />
-                  </td>
-
-                  <td className="py-3.5 px-4 text-right">
-                    <div className="flex items-center justify-end gap-1.5">
-                      {canReview && (<>
-                      <button
-                        onClick={(e) => handleQuickApprove(e, dec.id)}
-                        disabled={isProcessing}
-                        className="px-2.5 py-1 text-xs font-semibold text-emerald-300 bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-800/50 rounded-lg transition disabled:opacity-50"
-                        title="Quick Approve"
-                      >
-                        {isProcessing ? '...' : 'Approve'}
-                      </button>
-                      <button
-                        onClick={(e) => handleQuickReject(e, dec.id)}
-                        disabled={isProcessing}
-                        className="px-2.5 py-1 text-xs font-semibold text-rose-300 bg-rose-950/60 hover:bg-rose-900/60 border border-rose-800/50 rounded-lg transition disabled:opacity-50"
-                        title="Quick Reject"
-                      >
-                        Reject
-                      </button>
-                      </>)}
-                      <Link
-                        href={`/dashboard/cases/${dec.id}`}
-                        className="px-2.5 py-1 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition"
-                      >
-                        Review →
-                      </Link>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </div>
+                {canReview && (
+                  <div className="relative flex shrink-0 items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleReject(dec.id)}
+                      disabled={busy}
+                      className="rounded-full border border-line px-3 py-1.5 text-xs font-medium text-paper/85 transition-colors hover:border-stop hover:text-stop disabled:opacity-50"
+                    >
+                      Reject
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleApprove(dec.id)}
+                      disabled={busy}
+                      className="rounded-full bg-signal px-3.5 py-1.5 text-xs font-semibold text-ink transition-colors hover:bg-paper disabled:opacity-50"
+                    >
+                      {busy ? 'Saving…' : 'Approve'}
+                    </button>
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
   );
 }

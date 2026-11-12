@@ -1,82 +1,70 @@
 import React from 'react';
+import { actionLabel, deriveOutcome } from '@/lib/format';
+
+const TONE = {
+  signal: 'bg-signal/10 text-signal ring-signal/25',
+  hold: 'bg-hold/10 text-hold ring-hold/25',
+  stop: 'bg-stop/10 text-stop ring-stop/25',
+  neutral: 'bg-paper/[0.06] text-paper/85 ring-paper/10',
+  muted: 'bg-transparent text-muted ring-line',
+};
+
+const DOT = {
+  signal: 'bg-signal',
+  hold: 'bg-hold',
+  stop: 'bg-stop',
+  neutral: 'bg-paper/60',
+  muted: 'bg-muted',
+};
+
+export function Badge({ tone = 'neutral', children, className = '' }) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${TONE[tone]} ${className}`}
+    >
+      <span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full ${DOT[tone]}`} />
+      {children}
+    </span>
+  );
+}
 
 export function PolicyBadge({ decision }) {
   const norm = (decision || '').toUpperCase();
-  if (norm === 'ALLOW') {
-    return (
-      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-        ✓ ALLOW
-      </span>
-    );
-  }
-  if (norm === 'REQUIRE_APPROVAL') {
-    return (
-      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/30">
-        ⚠ REQUIRE APPROVAL
-      </span>
-    );
-  }
-  if (norm === 'BLOCK') {
-    return (
-      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-rose-500/10 text-rose-400 border border-rose-500/30">
-        ✕ BLOCK
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-800 text-slate-400 border border-slate-700">
-      {decision || 'UNKNOWN'}
-    </span>
-  );
+  if (norm === 'ALLOW') return <Badge tone="signal">Allowed</Badge>;
+  if (norm === 'REQUIRE_APPROVAL') return <Badge tone="hold">Needs approval</Badge>;
+  if (norm === 'BLOCK') return <Badge tone="stop">Blocked</Badge>;
+  return <Badge tone="muted">{decision || 'Not evaluated'}</Badge>;
 }
 
 export function StatusBadge({ status }) {
   const norm = (status || '').toLowerCase();
-  let color = 'bg-slate-800 text-slate-400 border-slate-700';
-  let label = status || 'Unknown';
+  if (norm === 'executed' || norm === 'success') return <Badge tone="neutral">Executed</Badge>;
+  if (norm === 'recovered') return <Badge tone="signal">Recovered</Badge>;
+  if (norm === 'pending_review') return <Badge tone="hold">Needs review</Badge>;
+  if (norm === 'blocked') return <Badge tone="stop">Blocked</Badge>;
+  if (norm === 'failed') return <Badge tone="stop">Failed</Badge>;
+  return <Badge tone="muted">{status || 'Unknown'}</Badge>;
+}
 
-  if (norm === 'executed' || norm === 'success') {
-    color = 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30';
-    label = 'Executed';
-  } else if (norm === 'recovered') {
-    color = 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30';
-    label = 'Recovered';
-  } else if (norm === 'pending_review' || norm === 'require_approval') {
-    color = 'bg-amber-500/10 text-amber-400 border-amber-500/30 animate-pulse';
-    label = 'Pending Review';
-  } else if (norm === 'blocked') {
-    color = 'bg-rose-500/10 text-rose-400 border-rose-500/30';
-    label = 'Blocked';
-  } else if (norm === 'failed') {
-    color = 'bg-red-500/10 text-red-400 border-red-500/30';
-    label = 'Failed';
-  }
-
-  return (
-    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${color}`}>
-      {label}
-    </span>
-  );
+export function OutcomeBadge({ decision, transaction }) {
+  const outcome = deriveOutcome(decision, transaction);
+  return <Badge tone={outcome.tone}>{outcome.label}</Badge>;
 }
 
 export function ActionBadge({ action }) {
-  const norm = (action || '').toLowerCase();
-  let label = action ? action.replace(/_/g, ' ') : 'N/A';
-  let color = 'bg-indigo-500/10 text-indigo-300 border-indigo-500/20';
+  return <span className="whitespace-nowrap text-sm text-paper/85">{actionLabel(action)}</span>;
+}
 
-  if (norm.includes('retry')) {
-    color = 'bg-blue-500/10 text-blue-300 border-blue-500/30';
-  } else if (norm.includes('recovery') || norm.includes('message') || norm.includes('link')) {
-    color = 'bg-purple-500/10 text-purple-300 border-purple-500/30';
-  } else if (norm.includes('escalate') || norm.includes('human')) {
-    color = 'bg-orange-500/10 text-orange-300 border-orange-300/30';
-  } else if (norm.includes('discount') || norm.includes('plan')) {
-    color = 'bg-teal-500/10 text-teal-300 border-teal-500/30';
-  }
-
+export function ScoreMeter({ score, className = '' }) {
+  if (score === null || score === undefined) return <span className="text-sm text-muted">—</span>;
+  const pct = Math.round(score * 100);
+  const bar = score >= 0.7 ? 'bg-signal' : score >= 0.4 ? 'bg-hold' : 'bg-stop';
   return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-mono capitalize border ${color}`}>
-      {label}
+    <span className={`inline-flex items-center gap-2.5 ${className}`} title={`Recovery likelihood ${pct}%`}>
+      <span className="relative h-1.5 w-14 overflow-hidden rounded-full bg-line" aria-hidden="true">
+        <span className={`absolute inset-y-0 left-0 rounded-full ${bar}`} style={{ width: `${Math.max(4, pct)}%` }} />
+      </span>
+      <span className="w-9 font-mono text-xs tabular-nums text-paper/85">{pct}%</span>
     </span>
   );
 }

@@ -6,10 +6,10 @@ import { useAuth } from '@/components/AuthProvider';
 
 function FullPageMessage({ title, detail }) {
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6 font-sans">
-      <div className="text-center space-y-2">
-        <p className="text-sm font-semibold text-slate-200">{title}</p>
-        {detail && <p className="text-xs text-slate-500">{detail}</p>}
+    <div className="flex min-h-screen items-center justify-center bg-ink p-6 font-sans text-paper">
+      <div className="max-w-sm space-y-2 text-center">
+        <p className="font-display text-2xl tracking-tight">{title}</p>
+        {detail && <p className="text-sm text-muted">{detail}</p>}
       </div>
     </div>
   );

@@ -8,8 +8,11 @@ import {
   normalizeEmail,
 } from '../../db/queries/merchants.queries.js';
 import { checkRateLimit, peekRateLimit, clearRateLimit } from '../../redis/redis.client.js';
+import { FirebaseTokenVerifier } from './firebase-token-verifier.js';
 
 const MAX_EMAIL_LENGTH = 254;
+const MAX_ID_TOKEN_LENGTH = 4096;
+const GOOGLE_SIGN_IN_PROVIDER = 'google.com';
 
 export class AuthError extends Error {
   constructor(statusCode, code, message, extra = {}) {
@@ -31,6 +34,28 @@ export function toPublicUser(user, merchant) {
     email: user.email,
     role: user.role,
     merchant: { id: merchant.id, name: merchant.name },
+  };
+}
+
+function assertAccountActive(row) {
+  if (row.user.status !== 'active' || row.merchant.status !== 'active') {
+    throw new AuthError(403, 'ACCOUNT_DISABLED', 'This account is disabled. Contact your administrator.');
+  }
+}
+
+async function issueSession(row) {
+  await recordSuccessfulLogin(row.user.id);
+
+  const token = AuthService.issueMerchantToken({
+    userId: row.user.id,
+    merchantId: row.merchant.id,
+    role: row.user.role,
+  });
+
+  return {
+    token,
+    expiresIn: config.jwtExpiresIn,
+    user: toPublicUser(row.user, row.merchant),
   };
 }
 
@@ -78,23 +103,50 @@ export class MerchantAuthService {
     }
 
     // Correct credentials but the account cannot sign in
-    if (row.user.status !== 'active' || row.merchant.status !== 'active') {
-      throw new AuthError(403, 'ACCOUNT_DISABLED', 'This account is disabled. Contact your administrator.');
-    }
+    assertAccountActive(row);
 
     await clearRateLimit(failKey);
-    await recordSuccessfulLogin(row.user.id);
+    return issueSession(row);
+  }
 
-    const token = AuthService.issueMerchantToken({
-      userId: row.user.id,
-      merchantId: row.merchant.id,
-      role: row.user.role,
-    });
+  /**
+   * Exchange a verified Firebase Google ID token for a RecoverIQ session.
+   * Sign-up stays invite-only: the Google email must already belong to a provisioned merchant user.
+   *
+   * @returns {Promise<{ token: string, expiresIn: string, user: Object }>}
+   */
+  static async loginWithGoogle({ idToken, ip = 'unknown' } = {}) {
+    if (!FirebaseTokenVerifier.isConfigured()) {
+      throw new AuthError(503, 'GOOGLE_SIGN_IN_UNAVAILABLE', 'Google sign-in is not configured.');
+    }
+    if (typeof idToken !== 'string' || idToken.length === 0 || idToken.length > MAX_ID_TOKEN_LENGTH) {
+      throw new AuthError(400, 'INVALID_INPUT', 'A Google ID token is required');
+    }
 
-    return {
-      token,
-      expiresIn: config.jwtExpiresIn,
-      user: toPublicUser(row.user, row.merchant),
-    };
+    const { maxAttemptsPerIp, windowSeconds } = config.loginRateLimit;
+    const ipAllowed = await checkRateLimit(`login:ip:${ip}`, maxAttemptsPerIp, windowSeconds);
+    if (!ipAllowed) {
+      throw new AuthError(429, 'TOO_MANY_ATTEMPTS', 'Too many login attempts. Try again later.', { retryAfterSeconds: windowSeconds });
+    }
+
+    let claims;
+    try {
+      claims = await FirebaseTokenVerifier.verify(idToken);
+    } catch (error) {
+      console.warn('[Google Sign-In] Token rejected:', error.code || error.name);
+      throw new AuthError(401, 'INVALID_GOOGLE_TOKEN', 'Google sign-in failed. Please try again.');
+    }
+
+    if (claims.firebase?.sign_in_provider !== GOOGLE_SIGN_IN_PROVIDER || !claims.email || claims.email_verified !== true) {
+      throw new AuthError(401, 'INVALID_GOOGLE_TOKEN', 'Google sign-in failed. Please try again.');
+    }
+
+    const row = await findUserWithMerchantByEmail(normalizeEmail(claims.email));
+    if (!row) {
+      throw new AuthError(403, 'ACCOUNT_NOT_PROVISIONED', 'This Google account does not have RecoverIQ access. Ask your administrator to add it.');
+    }
+
+    assertAccountActive(row);
+    return issueSession(row);
   }
 }

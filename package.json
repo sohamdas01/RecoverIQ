@@ -20,5 +20,9 @@
   },
   "devDependencies": {
     "drizzle-kit": "^0.30.2"
+  },
+  "overrides": {
+    "@grpc/grpc-js": "^1.14.7",
+    "rimraf": "^6.1.4"
   }
 }

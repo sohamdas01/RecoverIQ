@@ -1,5 +1,30 @@
 import { MerchantAuthService, AuthError, toPublicUser } from '../../services/auth/merchant-auth.service.js';
 
+function sendSession(res, result) {
+  res.set('Cache-Control', 'no-store');
+  return res.status(200).json({
+    success: true,
+    token: result.token,
+    tokenType: 'Bearer',
+    expiresIn: result.expiresIn,
+    user: result.user,
+  });
+}
+
+function sendAuthFailure(error, res, next) {
+  if (error instanceof AuthError) {
+    if (error.retryAfterSeconds) {
+      res.set('Retry-After', String(error.retryAfterSeconds));
+    }
+    return res.status(error.statusCode).json({
+      success: false,
+      code: error.code,
+      message: error.message,
+    });
+  }
+  return next(error);
+}
+
 /**
  * POST /api/auth/login
  * Body: { email, password }
@@ -7,28 +32,22 @@ import { MerchantAuthService, AuthError, toPublicUser } from '../../services/aut
 export async function login(req, res, next) {
   try {
     const { email, password } = req.body || {};
-    const result = await MerchantAuthService.login({ email, password, ip: req.ip });
-
-    res.set('Cache-Control', 'no-store');
-    return res.status(200).json({
-      success: true,
-      token: result.token,
-      tokenType: 'Bearer',
-      expiresIn: result.expiresIn,
-      user: result.user,
-    });
+    return sendSession(res, await MerchantAuthService.login({ email, password, ip: req.ip }));
   } catch (error) {
-    if (error instanceof AuthError) {
-      if (error.retryAfterSeconds) {
-        res.set('Retry-After', String(error.retryAfterSeconds));
-      }
-      return res.status(error.statusCode).json({
-        success: false,
-        code: error.code,
-        message: error.message,
-      });
-    }
-    return next(error);
+    return sendAuthFailure(error, res, next);
+  }
+}
+
+/**
+ * POST /api/auth/google
+ * Body: { idToken } (a Firebase ID token from Google sign-in)
+ */
+export async function loginWithGoogle(req, res, next) {
+  try {
+    const { idToken } = req.body || {};
+    return sendSession(res, await MerchantAuthService.loginWithGoogle({ idToken, ip: req.ip }));
+  } catch (error) {
+    return sendAuthFailure(error, res, next);
   }
 }
 

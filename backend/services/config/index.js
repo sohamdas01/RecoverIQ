@@ -9,6 +9,9 @@ export const config = {
   // Database & Cache
   databaseUrl: process.env.DATABASE_URL || 'postgresql://recoveriq_user:recoveriq_password@localhost:5433/recoveriq_db',
   redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
+  firebase: {
+    projectId: process.env.FIREBASE_PROJECT_ID || '',
+  },
   
   // Microservices
   genaiServiceUrl: process.env.GENAI_SERVICE_URL || 'http://localhost:8001',

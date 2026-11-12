@@ -2,24 +2,140 @@
 
 import React, { useState, useEffect, useCallback, use } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
 import Header from '@/components/Header';
-import { PolicyBadge, StatusBadge, ActionBadge } from '@/components/StatusBadge';
-import DecisionTimeline from '@/components/DecisionTimeline';
+import { Badge, OutcomeBadge, PolicyBadge } from '@/components/StatusBadge';
 import AskRecoverIQPanel from '@/components/AskRecoverIQPanel';
 import { useAuth } from '@/components/AuthProvider';
+import { fetchCaseExplanation, approveCase, rejectCase, modifyCase } from '@/lib/api';
 import {
-  fetchCaseExplanation,
-  approveCase,
-  rejectCase,
-  modifyCase,
-} from '@/lib/api';
+  actionLabel,
+  formatDateTime,
+  formatMoney,
+  formatTime,
+  humanize,
+  methodLabel,
+  reasonLabel,
+  scoreTone,
+  shortId,
+  toScore,
+} from '@/lib/format';
+
+const TONE_TEXT = { signal: 'text-signal', hold: 'text-hold', stop: 'text-stop', muted: 'text-muted' };
+const field =
+  'w-full rounded-lg border border-line bg-ink px-3.5 py-2.5 text-sm text-paper placeholder:text-muted/70 focus-visible:border-signal focus-visible:outline-none';
+const labelText = 'block text-xs font-medium text-paper/85';
+
+/* ------------------------------------------------------------------ */
+/* Small building blocks                                               */
+/* ------------------------------------------------------------------ */
+
+function Step({ index, title, meta, time, tone = 'neutral', last = false, children }) {
+  const node = {
+    signal: 'border-signal text-signal',
+    hold: 'border-hold text-hold',
+    stop: 'border-stop text-stop',
+    neutral: 'border-line text-paper/85',
+  }[tone];
+  return (
+    <li className="relative grid grid-cols-[2.25rem_minmax(0,1fr)] gap-x-4 sm:gap-x-5">
+      {!last && <span aria-hidden="true" className="absolute bottom-0 left-[1.125rem] top-10 w-px -translate-x-1/2 bg-line" />}
+      <span
+        aria-hidden="true"
+        className={`relative z-10 flex size-9 items-center justify-center rounded-full border bg-ink-raised font-mono text-xs ${node}`}
+      >
+        {String(index).padStart(2, '0')}
+      </span>
+      <div className={last ? 'pb-1' : 'pb-9'}>
+        <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 pt-1.5">
+          <h3 className="text-base font-medium text-paper">{title}</h3>
+          {time && <span className="font-mono text-[11px] text-muted">{time}</span>}
+        </div>
+        {meta && <p className="mt-0.5 text-xs text-muted">{meta}</p>}
+        <div className="mt-4">{children}</div>
+      </div>
+    </li>
+  );
+}
+
+function Fact({ label, children, mono = false }) {
+  return (
+    <div className="flex items-baseline justify-between gap-4 py-2.5">
+      <dt className="shrink-0 text-xs text-muted">{label}</dt>
+      <dd className={`min-w-0 truncate text-right text-sm text-paper ${mono ? 'font-mono text-xs' : ''}`}>{children}</dd>
+    </div>
+  );
+}
+
+// Diverging bars around a zero line: green pushes toward recovery, red away.
+// Each bar carries its signed value and a description, so colour is never the only cue.
+function AttributionBars({ attributions = [] }) {
+  const merged = new Map();
+  for (const a of attributions) {
+    const prev = merged.get(a.code);
+    merged.set(a.code, prev ? { ...prev, shap_value: (Number(prev.shap_value) || 0) + (Number(a.shap_value) || 0) } : a);
+  }
+  const rows = [...merged.values()].sort((a, b) => Math.abs(b.shap_value) - Math.abs(a.shap_value)).slice(0, 6);
+  const max = Math.max(...rows.map((r) => Math.abs(Number(r.shap_value) || 0)), 0.01);
+  return (
+    <ul className="space-y-3">
+      {rows.map((r, i) => {
+        const value = Number(r.shap_value) || 0;
+        const width = `${(Math.abs(value) / max) * 50}%`;
+        const positive = value >= 0;
+        return (
+          <li key={`${r.code}-${i}`} title={r.description}>
+            <div className="flex items-baseline justify-between gap-3 text-xs">
+              <span className="truncate text-paper/90">{humanize(r.code)}</span>
+              <span className={`shrink-0 font-mono tabular-nums ${positive ? 'text-signal' : 'text-stop'}`}>
+                {positive ? '+' : '−'}
+                {Math.abs(value).toFixed(2)}
+              </span>
+            </div>
+            <div className="relative mt-1.5 h-1.5 rounded-full bg-line/60" aria-hidden="true">
+              <span className="absolute inset-y-[-3px] left-1/2 w-px bg-muted/50" />
+              <span
+                className={`absolute inset-y-0 rounded-full ${positive ? 'left-1/2 bg-signal' : 'right-1/2 bg-stop'}`}
+                style={{ width }}
+              />
+            </div>
+            {r.description && <p className="mt-1 text-[11px] leading-snug text-muted">{r.description}</p>}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function Modal({ title, description, onClose, children }) {
+  useEffect(() => {
+    const onKey = (e) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/80 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label={title}>
+      <div className="w-full max-w-lg rounded-2xl border border-line bg-ink-raised p-6 shadow-2xl shadow-black/40">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="font-display text-2xl tracking-tight text-paper">{title}</h3>
+            {description && <p className="mt-1 text-sm text-muted">{description}</p>}
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close" className="rounded-lg p-1 text-xl leading-none text-muted hover:text-paper">
+            ×
+          </button>
+        </div>
+        <div className="mt-5">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Page                                                                */
+/* ------------------------------------------------------------------ */
 
 export default function CaseDetailPage({ params }) {
-  const router = useRouter();
-  // React 19 / Next.js 16 params unwrap
-  const resolvedParams = use(params);
-  const caseId = resolvedParams.caseId;
+  const { caseId } = use(params);
 
   const [caseData, setCaseData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -28,7 +144,6 @@ export default function CaseDetailPage({ params }) {
   const { canReview } = useAuth();
   const [feedback, setFeedback] = useState(null);
 
-  // Review & Modification Modal State
   const [reviewReason, setReviewReason] = useState('');
   const [showRejectModal, setShowRejectModal] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
@@ -72,17 +187,13 @@ export default function CaseDetailPage({ params }) {
     return () => clearTimeout(initialLoad);
   }, [caseId, fetchCase]);
 
-  // APPROVE Action
   const handleApprove = async () => {
     setActionLoading(true);
     setFeedback(null);
     try {
       const res = await approveCase(caseId, reviewReason || 'Approved by merchant reviewer via dashboard');
       if (res.success) {
-        setFeedback({
-          type: 'success',
-          message: 'Case successfully approved! Gated through Policy Engine and dispatched for execution.',
-        });
+        setFeedback({ type: 'success', message: 'Approved. The policy engine re-checked the action and dispatched it.' });
         setReviewReason('');
         await loadCase();
       } else {
@@ -95,14 +206,12 @@ export default function CaseDetailPage({ params }) {
     }
   };
 
-  // REJECT Action
   const handleRejectSubmit = async (e) => {
     e.preventDefault();
     if (!rejectReason.trim()) {
       setFeedback({ type: 'error', message: 'Please provide a reason for rejecting this case.' });
       return;
     }
-
     setActionLoading(true);
     setFeedback(null);
     try {
@@ -110,10 +219,7 @@ export default function CaseDetailPage({ params }) {
       if (res.success) {
         setShowRejectModal(false);
         setRejectReason('');
-        setFeedback({
-          type: 'success',
-          message: 'Case rejected. No further automated or customer recovery action will be taken.',
-        });
+        setFeedback({ type: 'success', message: 'Rejected. No automated or customer-facing action will be taken.' });
         await loadCase();
       } else {
         setFeedback({ type: 'error', message: res.error || 'Failed to reject recovery case.' });
@@ -125,57 +231,47 @@ export default function CaseDetailPage({ params }) {
     }
   };
 
-  // MODIFY Action
   const handleModifySubmit = async (e) => {
     e.preventDefault();
     setModifyValidationErr(null);
 
-    // Validate frontend inputs
     if (!modifyReason.trim()) {
       setModifyValidationErr('Merchant override reason is required.');
       return;
     }
 
-    const params = {};
+    const modifiedParams = {};
     if (modifiedAction === 'RETRY_WITH_DISCOUNT') {
       const disc = parseInt(modifiedDiscount, 10);
       if (isNaN(disc) || disc < 5 || disc > 30) {
         setModifyValidationErr('Discount percentage must be between 5% and 30%.');
         return;
       }
-      params.discount_percent = disc;
-      params.channel = modifiedChannel;
+      modifiedParams.discount_percent = disc;
+      modifiedParams.channel = modifiedChannel;
     } else if (modifiedAction === 'SWITCH_GATEWAY') {
       if (!modifiedGateway) {
         setModifyValidationErr('A fallback payment gateway must be selected.');
         return;
       }
-      params.fallback_gateway = modifiedGateway;
+      modifiedParams.fallback_gateway = modifiedGateway;
     } else if (modifiedAction === 'SCHEDULE_RETRY') {
       const delay = parseInt(modifiedDelay, 10);
       if (isNaN(delay) || delay < 1 || delay > 72) {
         setModifyValidationErr('Retry delay must be between 1 and 72 hours.');
         return;
       }
-      params.delay_hours = delay;
+      modifiedParams.delay_hours = delay;
     }
 
     setActionLoading(true);
     setFeedback(null);
     try {
-      const res = await modifyCase(caseId, {
-        modifiedAction,
-        modifiedParams: params,
-        reasoning: modifyReason,
-      });
-
+      const res = await modifyCase(caseId, { modifiedAction, modifiedParams, reasoning: modifyReason });
       if (res.success) {
         setShowModifyModal(false);
         setModifyReason('');
-        setFeedback({
-          type: 'success',
-          message: `Action modified to ${modifiedAction}. Policy re-evaluated and scheduled.`,
-        });
+        setFeedback({ type: 'success', message: `Changed to ${actionLabel(modifiedAction)}. The policy engine re-evaluated it.` });
         await loadCase();
       } else {
         setFeedback({ type: 'error', message: res.error || 'Failed to modify recovery case.' });
@@ -187,13 +283,15 @@ export default function CaseDetailPage({ params }) {
     }
   };
 
-  if (loading) {
+  /* ----------------------------- states ----------------------------- */
+
+  if (loading && !caseData) {
     return (
-      <div className="space-y-6">
-        <Header title="Case Details" subtitle="Loading recovery case telemetry..." />
-        <div className="flex flex-col items-center justify-center py-24 bg-slate-900/60 border border-slate-800 rounded-2xl">
-          <div className="w-10 h-10 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
-          <p className="mt-4 text-sm text-slate-400 font-medium">Fetching multi-agent recovery audit logs...</p>
+      <div className="space-y-6" aria-busy="true">
+        <Header eyebrow={`Recovery case · ${shortId(caseId)}`} title="Loading case…" />
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
+          <div className="h-[32rem] animate-pulse rounded-2xl bg-ink-raised" />
+          <div className="h-80 animate-pulse rounded-2xl bg-ink-raised" />
         </div>
       </div>
     );
@@ -202,33 +300,23 @@ export default function CaseDetailPage({ params }) {
   if (error || !caseData) {
     return (
       <div className="space-y-6">
-        <Header title="Case Details" subtitle="Error viewing recovery case" />
-        <div className="p-8 bg-rose-950/30 border border-rose-900/50 rounded-2xl text-center">
-          <div className="w-12 h-12 rounded-full bg-rose-500/20 text-rose-400 flex items-center justify-center mx-auto mb-3">
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-            </svg>
-          </div>
-          <h3 className="text-lg font-semibold text-rose-200">Unable to Load Recovery Case</h3>
-          <p className="text-sm text-rose-400 mt-1">{error || 'The requested case could not be found.'}</p>
+        <Header eyebrow={`Recovery case · ${shortId(caseId)}`} title="Case unavailable" />
+        <div className="rounded-2xl border border-line bg-ink-raised px-6 py-14 text-center">
+          <p className="text-sm font-medium text-stop">{error || 'The requested case could not be found.'}</p>
           <div className="mt-6 flex justify-center gap-3">
-            <button
-              onClick={loadCase}
-              className="px-4 py-2 text-sm font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg transition-colors"
-            >
+            <button type="button" onClick={loadCase} className="rounded-full border border-line px-4 py-2 text-xs text-paper hover:border-paper/60">
               Retry
             </button>
-            <Link
-              href="/dashboard/cases"
-              className="px-4 py-2 text-sm font-medium bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg transition-colors"
-            >
-              Back to Cases
+            <Link href="/dashboard/cases" className="rounded-full bg-signal px-4 py-2 text-xs font-semibold text-ink hover:bg-paper">
+              Back to cases
             </Link>
           </div>
         </div>
       </div>
     );
   }
+
+  /* ------------------------------ data ------------------------------ */
 
   const {
     transaction = {},
@@ -238,665 +326,458 @@ export default function CaseDetailPage({ params }) {
     agent2 = {},
     policy = {},
     overrides = [],
+    humanReview,
     execution,
     status,
     finalAction,
+    createdAt,
   } = caseData;
 
-  const isPendingReview = status === 'pending_review' || policy.decision === 'REQUIRE_APPROVAL';
-  const mlScore = typeof ml.score === 'number' ? ml.score : typeof ml.probability === 'number' ? ml.probability : 0.75;
-  const scorePercent = Math.round(mlScore * 100);
+  const decision = { status, finalAction, recommendedAction: agent1.recommendation };
+  const isPendingReview = status === 'pending_review';
+  const score = toScore(ml.score ?? ml.probability);
+  const scorePct = score === null ? null : Math.round(score * 100);
+  const confidence = toScore(agent1.confidence);
+  const playbooks = agent1.playbookSources || [];
+  const toolParams = agent2.parameters || {};
+  const recoveryUrl = execution?.result?.recoveryUrl || execution?.recoveryUrl;
+  const review = humanReview || (overrides[0] ? { reviewAction: overrides[0].merchantAction, reasoning: overrides[0].merchantReasoning, reviewedAt: overrides[0].createdAt } : null);
+  const policyTone = policy.decision === 'ALLOW' ? 'signal' : policy.decision === 'BLOCK' ? 'stop' : policy.decision ? 'hold' : 'neutral';
+  const executed = execution && (execution.success || execution.status === 'success');
+
+  const steps = [
+    {
+      key: 'ingest',
+      title: 'Failed payment received',
+      meta: 'Ingested from the payments stream',
+      time: formatTime(transaction.createdAt),
+      tone: 'stop',
+      body: (
+        <p className="text-sm leading-relaxed text-paper/85">
+          A payment of{' '}
+          <span className="text-paper">{formatMoney(transaction.amount, transaction.currency, { decimals: 2 })}</span> was declined:{' '}
+          <span className="text-stop">{reasonLabel(transaction.failureReason)}</span>
+          {transaction.attemptCount ? ` on attempt ${transaction.attemptCount}` : ''}.
+        </p>
+      ),
+    },
+    {
+      key: 'ml',
+      title: 'Recovery likelihood scored',
+      meta: `XGBoost model ${ml.modelVersion || ''}${ml.isFallback ? ' · fallback score' : ''}`.trim(),
+      tone: scoreTone(score) === 'muted' ? 'neutral' : scoreTone(score),
+      body: (
+        <div className="grid gap-6 sm:grid-cols-[9rem_minmax(0,1fr)]">
+          <div>
+            <p className={`font-display text-5xl leading-none tracking-tight ${TONE_TEXT[scoreTone(score)]}`}>
+              {scorePct === null ? '—' : `${scorePct}%`}
+            </p>
+            <p className="mt-2 text-xs text-muted">chance this payment can be recovered</p>
+          </div>
+          {ml.attributions?.length > 0 ? (
+            <div>
+              <p className="mb-3 text-[11px] uppercase tracking-[0.12em] text-muted">What moved the score</p>
+              <AttributionBars attributions={ml.attributions} />
+            </div>
+          ) : ml.reasonCodes?.length > 0 ? (
+            <ul className="flex flex-wrap gap-2 self-start">
+              {ml.reasonCodes.map((code, i) => (
+                <li key={`${code}-${i}`} className="rounded-full border border-line px-2.5 py-1 text-xs text-paper/85">{humanize(code)}</li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ),
+    },
+    {
+      key: 'analyst',
+      title: 'Analyst agent recommended',
+      meta: confidence !== null ? `${Math.round(confidence * 100)}% confidence · grounded in ${playbooks.length} playbook${playbooks.length === 1 ? '' : 's'}` : null,
+      tone: 'neutral',
+      body: (
+        <div className="space-y-4">
+          <p className="text-sm text-paper">
+            Recommends <span className="font-medium text-signal">{actionLabel(agent1.recommendation)}</span>
+          </p>
+          {agent1.rationale && (
+            <blockquote className="border-l-2 border-signal/60 pl-4 text-sm leading-relaxed text-paper/85">{agent1.rationale}</blockquote>
+          )}
+          {playbooks.length > 0 && (
+            <ul className="divide-y divide-line overflow-hidden rounded-xl border border-line">
+              {playbooks.map((pb, idx) => {
+                const sim = toScore(pb.similarity ?? pb.similarityScore);
+                return (
+                  <li key={`${pb.id || "pb"}-${idx}`} className="flex items-center gap-4 px-4 py-3">
+                    <span className="font-mono text-[11px] text-muted">{pb.playbookId || pb.id || `PB-${idx + 1}`}</span>
+                    <span className="min-w-0 flex-1 truncate text-sm text-paper/90">{pb.title || pb.ruleTitle}</span>
+                    {sim !== null && (
+                      <span className="shrink-0 font-mono text-xs tabular-nums text-paper/85" title="Vector similarity">
+                        {(sim * 100).toFixed(0)}% match
+                      </span>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: 'executor',
+      title: 'Executor agent proposed',
+      meta: agent2.latencyMs ? `Planned in ${agent2.latencyMs} ms` : null,
+      tone: 'neutral',
+      body: (
+        <div className="space-y-4">
+          <p className="text-sm text-paper">
+            Proposes <span className="font-medium text-signal">{actionLabel(agent2.proposedAction || finalAction)}</span>
+          </p>
+          {Object.keys(toolParams).length > 0 && (
+            <dl className="grid gap-px overflow-hidden rounded-xl border border-line bg-line sm:grid-cols-2">
+              {Object.entries(toolParams).map(([k, v]) => (
+                <div key={k} className={`bg-ink px-4 py-3 sm:last:odd:col-span-2 ${String(v).length > 40 ? 'sm:col-span-2' : ''}`}>
+                  <dt className="text-[11px] text-muted">{humanize(k)}</dt>
+                  <dd className="mt-1 break-words text-sm text-paper">{typeof v === 'object' ? JSON.stringify(v) : String(v)}</dd>
+                </div>
+              ))}
+            </dl>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: 'policy',
+      title: 'Policy engine checked it',
+      meta: [policy.policyVersion && `Policy ${policy.policyVersion}`, policy.primaryRuleId].filter(Boolean).join(' · ') || null,
+      time: formatTime(policy.evaluatedAt),
+      tone: policyTone,
+      body: (
+        <div className="space-y-3">
+          <PolicyBadge decision={policy.decision} />
+          {policy.reasons?.length > 0 && (
+            <ul className="space-y-1.5 text-sm text-paper/85">
+              {policy.reasons.map((r, i) => (
+                <li key={i} className="flex gap-2.5">
+                  <span aria-hidden="true" className="mt-2 size-1 shrink-0 rounded-full bg-muted" />
+                  {r}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ),
+    },
+    ...(review
+      ? [
+          {
+            key: 'review',
+            title: `Reviewer ${review.reviewAction === 'REJECT' ? 'rejected' : review.reviewAction === 'APPROVE' ? 'approved' : 'changed'} it`,
+            time: formatDateTime(review.reviewedAt),
+            tone: review.reviewAction === 'REJECT' ? 'stop' : 'hold',
+            body: (
+              <p className="text-sm leading-relaxed text-paper/85">
+                {review.reasoning ? `“${review.reasoning}”` : 'No note was left.'}
+                {review.reviewAction && !['APPROVE', 'REJECT'].includes(review.reviewAction) && (
+                  <> New action: <span className="text-paper">{actionLabel(review.reviewAction)}</span>.</>
+                )}
+              </p>
+            ),
+          },
+        ]
+      : []),
+    {
+      key: 'execution',
+      title: isPendingReview ? 'Waiting for a reviewer' : executed ? 'Action executed' : status === 'blocked' ? 'Nothing was executed' : 'Execution',
+      time: formatTime(execution?.executedAt),
+      tone: isPendingReview ? 'hold' : executed ? 'signal' : status === 'blocked' ? 'stop' : 'neutral',
+      body: isPendingReview ? (
+        <p className="text-sm text-paper/85">The proposed action is held until someone approves, changes or rejects it.</p>
+      ) : executed ? (
+        <div className="space-y-3 text-sm text-paper/85">
+          <p>
+            Ran <span className="text-paper">{actionLabel(execution.toolName)}</span>
+            {execution.result?.channel ? ` over ${execution.result.channel}` : ''}
+            {execution.result?.outcome ? ` · ${humanize(execution.result.outcome).toLowerCase()}` : ''}.
+          </p>
+          {recoveryUrl && (
+            <a href={recoveryUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-sm text-signal hover:text-paper">
+              Open the customer&apos;s recovery page ↗
+            </a>
+          )}
+        </div>
+      ) : (
+        <p className="text-sm text-paper/85">
+          {review?.reviewAction === 'REJECT'
+            ? 'The reviewer rejected the case, so no action ran.'
+            : status === 'blocked'
+              ? 'The policy engine stopped this case before any action ran.'
+              : execution
+                ? `The action did not complete (${humanize(execution.status || 'unknown').toLowerCase()}).`
+                : 'No execution has been recorded yet.'}
+        </p>
+      ),
+    },
+  ];
 
   return (
-    <div className="space-y-8 pb-16">
-      {/* Top Header */}
+    <div className="space-y-6 pb-16">
+      <Link href="/dashboard/cases" className="inline-flex items-center gap-1.5 text-xs text-muted transition-colors hover:text-paper">
+        <svg className="size-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7" />
+        </svg>
+        All cases
+      </Link>
+
       <Header
-        title={`Recovery Case: ${caseId}`}
-        subtitle={`Transaction ${transaction.id || caseData.transactionId || 'N/A'} • Created ${caseData.createdAt ? new Date(caseData.createdAt).toLocaleString() : 'N/A'}`}
+        eyebrow={`Case ${shortId(caseId)} · opened ${formatDateTime(createdAt || transaction.createdAt)}`}
+        title={`${formatMoney(transaction.amount, transaction.currency)} from ${customer.name || 'an unknown customer'}`}
+        subtitle={`${reasonLabel(transaction.failureReason)} · ${actionLabel(finalAction || agent1.recommendation)} · ${
+          policy.decision === 'ALLOW' ? 'cleared automatically' : policy.decision === 'BLOCK' ? 'blocked by policy' : isPendingReview ? 'waiting for a reviewer' : 'needed a reviewer'
+        }`}
         onRefresh={loadCase}
         refreshing={loading}
-      />
+      >
+        <OutcomeBadge decision={decision} transaction={transaction} />
+      </Header>
 
-      {/* Navigation Breadcrumb & Badges */}
-      <div className="flex flex-wrap items-center justify-between gap-4 -mt-4">
-        <Link
-          href="/dashboard/cases"
-          className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-400 hover:text-emerald-400 transition-colors"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-          </svg>
-          Back to all recovery cases
-        </Link>
-        <div className="flex items-center gap-2">
-          <PolicyBadge decision={policy.decision} />
-          <StatusBadge status={status} />
-          <ActionBadge action={finalAction || agent1.recommendation || agent2.proposedAction} />
-        </div>
-      </div>
-
-      {/* Feedback Toast / Alert */}
       {feedback && (
         <div
-          className={`p-4 rounded-xl border flex items-center justify-between ${
-            feedback.type === 'success'
-              ? 'bg-emerald-950/40 border-emerald-800/60 text-emerald-300'
-              : 'bg-rose-950/40 border-rose-800/60 text-rose-300'
+          role="status"
+          className={`flex items-center justify-between gap-3 rounded-xl px-4 py-3 text-sm ${
+            feedback.type === 'success' ? 'bg-signal/10 text-signal' : 'bg-stop/10 text-stop'
           }`}
         >
-          <div className="flex items-center gap-2.5">
-            <span className="text-lg">{feedback.type === 'success' ? '✓' : '⚠'}</span>
-            <span className="text-sm font-medium">{feedback.message}</span>
-          </div>
-          <button
-            onClick={() => setFeedback(null)}
-            className="text-xs text-slate-400 hover:text-white px-2 py-1 font-bold"
-          >
-            ✕
+          <span>{feedback.message}</span>
+          <button type="button" onClick={() => setFeedback(null)} aria-label="Dismiss" className="text-lg leading-none text-muted hover:text-paper">
+            ×
           </button>
         </div>
       )}
 
-      {/* ------------------------------------------------------------- */}
-      {/* HUMAN-IN-THE-LOOP REVIEW PANEL                                */}
-      {/* ------------------------------------------------------------- */}
-      {isPendingReview ? (
-        <div className="p-6 bg-gradient-to-r from-amber-950/40 via-amber-900/20 to-slate-900 border border-amber-600/40 rounded-2xl shadow-xl shadow-amber-950/20 space-y-6">
-          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-amber-800/30">
-            <div className="space-y-1">
-              <div className="flex items-center gap-2">
-                <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"></span>
-                <h3 className="text-base font-bold text-amber-200 uppercase tracking-wide">
-                  Human-in-the-Loop Review Panel
-                </h3>
-                <span className="px-2 py-0.5 text-[10px] font-mono font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded">
-                  REQUIRE_APPROVAL
-                </span>
-              </div>
-              <p className="text-sm text-slate-300">
-                This transaction triggered a Policy Engine safety gate. Merchant review is required before any recovery execution can proceed.
+      {isPendingReview && (
+        <section className="overflow-hidden rounded-2xl border border-hold/40 bg-hold/[0.06]">
+          <div className="flex flex-col gap-5 p-6 lg:flex-row lg:items-center lg:justify-between">
+            <div className="max-w-2xl">
+              <p className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.16em] text-hold">
+                <span aria-hidden="true" className="size-1.5 rounded-full bg-hold" />
+                Decision needed
+              </p>
+              <h2 className="mt-2 font-display text-3xl tracking-tight text-paper">
+                Approve {actionLabel(agent2.proposedAction || agent1.recommendation).toLowerCase()}?
+              </h2>
+              <p className="mt-2 text-sm leading-relaxed text-paper/80">
+                {policy.reasons?.[0] || 'This case crossed a policy threshold, so nothing runs until a reviewer decides.'}
               </p>
             </div>
-
-            {/* Action Buttons (reviewer / admin only; the backend enforces this too) */}
             {canReview ? (
-            <div className="flex items-center gap-2.5">
-              <button
-                onClick={handleApprove}
-                disabled={actionLoading}
-                className="px-4 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 rounded-xl shadow-md transition-all disabled:opacity-50 flex items-center gap-1.5"
-              >
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7" />
-                </svg>
-                {actionLoading ? 'Processing...' : 'APPROVE'}
-              </button>
-
-              <button
-                onClick={() => setShowModifyModal(true)}
-                disabled={actionLoading}
-                className="px-4 py-2 text-xs font-bold text-cyan-200 bg-cyan-950/60 hover:bg-cyan-900/60 border border-cyan-700/50 rounded-xl transition-all disabled:opacity-50 flex items-center gap-1"
-              >
-                <span>MODIFY</span>
-                <span>...</span>
-              </button>
-
-              <button
-                onClick={() => setShowRejectModal(true)}
-                disabled={actionLoading}
-                className="px-4 py-2 text-xs font-bold text-rose-300 bg-rose-950/60 hover:bg-rose-900/60 border border-rose-800/50 rounded-xl transition-all disabled:opacity-50 flex items-center gap-1"
-              >
-                <span>REJECT</span>
-              </button>
-            </div>
+              <div className="flex shrink-0 flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowRejectModal(true)}
+                  disabled={actionLoading}
+                  className="rounded-full border border-line px-4 py-2 text-sm text-paper transition-colors hover:border-stop hover:text-stop disabled:opacity-50"
+                >
+                  Reject
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowModifyModal(true)}
+                  disabled={actionLoading}
+                  className="rounded-full border border-line px-4 py-2 text-sm text-paper transition-colors hover:border-paper/60 disabled:opacity-50"
+                >
+                  Change action
+                </button>
+                <button
+                  type="button"
+                  onClick={handleApprove}
+                  disabled={actionLoading}
+                  className="rounded-full bg-signal px-5 py-2 text-sm font-semibold text-ink transition-colors hover:bg-paper disabled:opacity-50"
+                >
+                  {actionLoading ? 'Saving…' : 'Approve'}
+                </button>
+              </div>
             ) : (
-              <span className="px-3 py-1.5 text-xs font-semibold text-slate-300 bg-slate-800/60 border border-slate-700/60 rounded-lg">
-                Read-only access: your role cannot review cases
-              </span>
+              <Badge tone="muted">Read-only: your role cannot review cases</Badge>
             )}
           </div>
-
-          {/* Quick Review Rationale Input */}
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
-            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wide shrink-0">
-              Reviewer Note:
-            </span>
-            <input
-              type="text"
-              value={reviewReason}
-              onChange={(e) => setReviewReason(e.target.value)}
-              placeholder="Optional audit log note for APPROVE action..."
-              className="flex-1 px-3.5 py-2 text-xs bg-slate-950 border border-slate-700 rounded-xl text-slate-200 placeholder-slate-500 focus:outline-none focus:border-amber-500"
-            />
-          </div>
-
-          {/* Policy Trigger Rule Alert */}
-          {policy.reasons && policy.reasons.length > 0 && (
-            <div className="p-3 bg-amber-950/50 border border-amber-800/40 rounded-xl text-xs text-amber-300 flex items-start gap-2">
-              <span className="font-bold">Policy Gate Trigger:</span>
-              <span>{policy.reasons.join(' • ')}</span>
+          {canReview && (
+            <div className="border-t border-hold/25 px-6 py-4">
+              <label htmlFor="review-note" className="sr-only">Reviewer note</label>
+              <input
+                id="review-note"
+                type="text"
+                value={reviewReason}
+                onChange={(e) => setReviewReason(e.target.value)}
+                placeholder="Optional note for the audit log, saved with your approval"
+                className="w-full bg-transparent text-sm text-paper placeholder:text-muted/80 focus-visible:outline-none"
+              />
             </div>
           )}
-        </div>
-      ) : (
-        /* Already Reviewed / Resolved Banner */
-        <div className="p-5 bg-slate-900 border border-slate-800 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-sm ${
-              status === 'recovered' || status === 'executed'
-                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                : status === 'blocked' || status === 'rejected'
-                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                : 'bg-slate-800 text-slate-400'
-            }`}>
-              {status === 'recovered' || status === 'executed' ? '✓' : status === 'blocked' || status === 'rejected' ? '✕' : '●'}
-            </div>
-            <div>
-              <h3 className="text-sm font-bold text-slate-200">
-                Recovery Case Reviewed & Finalized ({status})
-              </h3>
-              <p className="text-xs text-slate-400 mt-0.5">
-                Final Action: <strong className="text-slate-300 font-mono">{finalAction || agent1.recommendation || 'None'}</strong>
-                {overrides.length > 0 && ` • Merchant Override: ${overrides[0].merchantReasoning}`}
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-mono text-slate-500">Terminal State</span>
-            <StatusBadge status={status} />
-          </div>
-        </div>
+        </section>
       )}
 
-      {/* Main Grid: 2 Column Layout */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-        {/* Left Column: Telemetry & Multi-Agent Details (8 Cols) */}
-        <div className="lg:col-span-8 space-y-8">
-          {/* Section 1: Transaction Information */}
-          <div className="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-6 shadow-sm">
-            <div className="flex items-center justify-between pb-4 mb-4 border-b border-slate-800">
-              <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
-                <svg className="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
-                </svg>
-                Transaction Telemetry
-              </h3>
-              <span className="text-xs font-mono text-slate-400">ID: {transaction.id || caseData.transactionId}</span>
-            </div>
-
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-              <div className="bg-slate-950/50 p-3.5 rounded-xl border border-slate-800/50">
-                <div className="text-[11px] font-semibold text-slate-400 uppercase">Amount</div>
-                <div className="text-lg font-bold text-slate-100 mt-0.5">
-                  {transaction.currency || 'USD'} {Number(transaction.amount || 0).toFixed(2)}
-                </div>
-              </div>
-              <div className="bg-slate-950/50 p-3.5 rounded-xl border border-slate-800/50">
-                <div className="text-[11px] font-semibold text-slate-400 uppercase">Gateway</div>
-                <div className="text-sm font-semibold text-slate-200 mt-1 capitalize">
-                  {transaction.paymentGateway || transaction.gateway || 'Stripe'}
-                </div>
-              </div>
-              <div className="bg-slate-950/50 p-3.5 rounded-xl border border-slate-800/50">
-                <div className="text-[11px] font-semibold text-slate-400 uppercase">Customer Tier</div>
-                <div className="text-sm font-semibold text-emerald-400 mt-1 uppercase">
-                  {customer.riskTier || customer.segment || 'Standard'}
-                </div>
-              </div>
-              <div className="bg-slate-950/50 p-3.5 rounded-xl border border-slate-800/50">
-                <div className="text-[11px] font-semibold text-slate-400 uppercase">Customer</div>
-                <div className="text-xs font-medium text-slate-300 mt-1 truncate" title={customer.email || 'N/A'}>
-                  {customer.name || customer.email || 'Guest User'}
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-4 p-3.5 bg-rose-950/20 border border-rose-900/40 rounded-xl">
-              <div className="flex items-start gap-2.5">
-                <div className="text-rose-400 mt-0.5">
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                </div>
-                <div>
-                  <div className="text-xs font-bold text-rose-300 uppercase tracking-wide">
-                    Failure Reason: {transaction.failureReason || 'INSUFFICIENT_FUNDS'}
-                  </div>
-                  <div className="text-xs text-rose-400/90 mt-0.5">
-                    Error Code: <code className="font-mono text-rose-300">{transaction.errorCode || 'card_declined'}</code> • {transaction.errorMessage || 'The card issuer declined the transaction.'}
-                  </div>
-                </div>
-              </div>
-            </div>
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
+        <section className="rounded-2xl border border-line bg-ink-raised p-6 sm:p-8">
+          <div className="mb-8 flex items-baseline justify-between gap-4">
+            <h2 className="font-display text-3xl tracking-tight text-paper">Decision trail</h2>
+            <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted">{steps.length} steps</span>
           </div>
+          <ol>
+            {steps.map((step, i) => (
+              <Step key={step.key} index={i + 1} title={step.title} meta={step.meta} time={step.time} tone={step.tone} last={i === steps.length - 1}>
+                {step.body}
+              </Step>
+            ))}
+          </ol>
+        </section>
 
-          {/* Section 2: ML Recovery Probability & Attributions */}
-          <div className="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-6 shadow-sm">
-            <div className="flex items-center justify-between pb-4 mb-4 border-b border-slate-800">
-              <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
-                <svg className="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                </svg>
-                ML Recovery Probability Engine
-              </h3>
-              <span className="text-xs font-mono text-cyan-400/80 bg-cyan-950/60 px-2.5 py-0.5 rounded border border-cyan-800/40">
-                Model: {ml.modelVersion || 'v1.0.0'}
-              </span>
-            </div>
+        <aside className="space-y-6 lg:sticky lg:top-8 lg:self-start">
+          <section className="rounded-2xl border border-line bg-ink-raised p-6">
+            <h2 className="text-sm font-medium text-paper">Case facts</h2>
+            <dl className="mt-3 divide-y divide-line">
+              <Fact label="Customer">{customer.name || '—'}</Fact>
+              <Fact label="Email">
+                <span title={customer.email}>{customer.email || '—'}</span>
+              </Fact>
+              <Fact label="Amount">{formatMoney(transaction.amount, transaction.currency, { decimals: 2 })}</Fact>
+              <Fact label="Method">{methodLabel(transaction.paymentMethod)}</Fact>
+              <Fact label="Decline">{reasonLabel(transaction.failureReason)}</Fact>
+              <Fact label="Attempt">{transaction.attemptCount ?? '—'}</Fact>
+              <Fact label="Payment status">{humanize(transaction.status) || '—'}</Fact>
+            </dl>
+          </section>
 
-            <div className="space-y-4">
-              <div>
-                <div className="flex items-center justify-between text-xs font-semibold mb-1.5">
-                  <span className="text-slate-300">Predicted Recovery Likelihood</span>
-                  <span className={`font-mono text-sm ${scorePercent >= 70 ? 'text-emerald-400' : scorePercent >= 40 ? 'text-amber-400' : 'text-rose-400'}`}>
-                    {scorePercent}% (Score: {mlScore.toFixed(3)})
-                  </span>
-                </div>
-                <div className="w-full bg-slate-950 h-3 rounded-full overflow-hidden border border-slate-800 p-0.5">
-                  <div
-                    className={`h-full rounded-full transition-all duration-500 ${
-                      scorePercent >= 70
-                        ? 'bg-gradient-to-r from-emerald-600 to-emerald-400'
-                        : scorePercent >= 40
-                        ? 'bg-gradient-to-r from-amber-600 to-amber-400'
-                        : 'bg-gradient-to-r from-rose-600 to-rose-400'
-                    }`}
-                    style={{ width: `${Math.min(100, Math.max(5, scorePercent))}%` }}
-                  ></div>
-                </div>
-              </div>
-
-              {/* Feature Attributions / SHAP Reason Codes */}
-              {ml.reasonCodes && ml.reasonCodes.length > 0 && (
-                <div>
-                  <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wide mb-2">Key Factor Attributions</div>
-                  <div className="flex flex-wrap gap-2">
-                    {ml.reasonCodes.map((code, idx) => (
-                      <span
-                        key={idx}
-                        className="text-xs font-mono px-2.5 py-1 rounded-md bg-slate-950 border border-slate-800 text-slate-300"
-                      >
-                        • {code}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Section 3: Agent 1 (Recovery Analyst) Recommendation & RAG Playbook Sources */}
-          <div className="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-6 shadow-sm">
-            <div className="flex items-center justify-between pb-4 mb-4 border-b border-slate-800">
-              <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-blue-400"></span>
-                Agent 1: Recovery Analyst
-              </h3>
-              <span className="text-xs text-blue-400 font-mono">
-                Confidence: {Math.round((agent1.confidence || 0.85) * 100)}%
-              </span>
-            </div>
-
-            <div className="space-y-4">
-              <div className="flex items-center gap-3">
-                <span className="text-xs font-semibold text-slate-400 uppercase">Recommended Strategy:</span>
-                <ActionBadge action={agent1.recommendation || finalAction} />
-              </div>
-
-              {agent1.rationale && (
-                <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 text-sm text-slate-300 leading-relaxed font-sans">
-                  {agent1.rationale}
-                </div>
-              )}
-
-              {/* Qdrant RAG Playbook Sources */}
-              {agent1.playbookSources && agent1.playbookSources.length > 0 && (
-                <div className="mt-4 pt-4 border-t border-slate-800/80">
-                  <div className="text-xs font-bold text-cyan-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">
-                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-                    </svg>
-                    Qdrant Vector RAG Playbooks Retrieved ({agent1.playbookSources.length})
-                  </div>
-                  <div className="space-y-2">
-                    {agent1.playbookSources.map((pb, idx) => (
-                      <div
-                        key={idx}
-                        className="p-3 bg-slate-950/80 border border-slate-800 rounded-xl text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2"
-                      >
-                        <div>
-                          <span className="font-semibold text-slate-200">{pb.title || pb.id || `Playbook #${idx + 1}`}</span>
-                          <span className="text-slate-400 ml-2">Action: <strong className="text-slate-300">{pb.strategy || pb.action}</strong></span>
-                        </div>
-                        {pb.similarity && (
-                          <span className="text-[11px] font-mono text-cyan-400 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-800/40 self-start sm:self-auto">
-                            Score: {(pb.similarity * 100).toFixed(1)}%
-                          </span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Section 4: Agent 2 (Recovery Executor) Proposed Execution */}
-          <div className="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-6 shadow-sm">
-            <div className="flex items-center justify-between pb-4 mb-4 border-b border-slate-800">
-              <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-indigo-400"></span>
-                Agent 2: Recovery Executor
-              </h3>
-              <span className="text-xs text-indigo-400 font-mono">
-                Tool Parameters Configured
-              </span>
-            </div>
-
-            <div className="space-y-3">
-              <div className="flex items-center gap-3">
-                <span className="text-xs font-semibold text-slate-400 uppercase">Proposed Action:</span>
-                <ActionBadge action={agent2.proposedAction || finalAction} />
-              </div>
-
-              {agent2.parameters && Object.keys(agent2.parameters).length > 0 && (
-                <div className="mt-3">
-                  <div className="text-[11px] font-bold text-slate-400 uppercase mb-1.5">Execution Tool Payload:</div>
-                  <pre className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-xs font-mono text-emerald-400 overflow-x-auto">
-                    {JSON.stringify(agent2.parameters, null, 2)}
-                  </pre>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Right Column: Policy Decision, Review, Execution & Timeline (4 Cols) */}
-        <div className="lg:col-span-4 space-y-8">
-          {/* Policy Decision Card */}
-          <div className="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-6 shadow-sm">
-            <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider mb-4 flex items-center gap-2">
-              <svg className="w-4 h-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-              </svg>
-              Policy Engine Guardrail
-            </h3>
-
-            <div className="space-y-4">
-              <div className="flex items-center justify-between p-3 bg-slate-950 rounded-xl border border-slate-800">
-                <span className="text-xs font-semibold text-slate-400">Verdict</span>
-                <PolicyBadge decision={policy.decision} />
-              </div>
-
-              {policy.primaryRuleId && (
-                <div className="text-xs text-slate-300">
-                  <span className="text-slate-400">Primary Rule:</span>{' '}
-                  <code className="font-mono text-cyan-400">{policy.primaryRuleId}</code>
-                </div>
-              )}
-
-              {policy.reasons && policy.reasons.length > 0 && (
-                <div className="p-3 bg-slate-950/80 rounded-xl border border-slate-800 text-xs text-slate-300">
-                  <div className="font-semibold text-slate-400 mb-1">Guardrail Rationale:</div>
-                  <ul className="list-disc list-inside space-y-1 text-slate-300">
-                    {policy.reasons.map((r, i) => (
-                      <li key={i}>{r}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Execution & Outcome Card */}
-          <div className="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-6 shadow-sm">
-            <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider mb-4 flex items-center gap-2">
-              <svg className="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-              </svg>
-              Recovery Outcome
-            </h3>
-
-            <div className="space-y-3">
-              <div className="flex items-center justify-between p-3 bg-slate-950 rounded-xl border border-slate-800">
-                <span className="text-xs font-semibold text-slate-400">Execution Status</span>
-                <StatusBadge status={status} />
-              </div>
-
-              {execution && (
-                <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-xs space-y-2">
-                  <div className="text-slate-400 font-semibold">Execution Details:</div>
-                  {execution.toolName && (
-                    <div className="text-slate-300">Tool: <code className="font-mono text-emerald-400">{execution.toolName}</code></div>
-                  )}
-                  {execution.dispatchedAt && (
-                    <div className="text-slate-400 text-[11px]">Dispatched: {new Date(execution.dispatchedAt).toLocaleTimeString()}</div>
-                  )}
-                  {execution.recoveryUrl && (
-                    <div className="pt-2">
-                      <a
-                        href={execution.recoveryUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300 underline font-medium"
-                      >
-                        Open Customer Recovery Link ↗
-                      </a>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Step-by-Step Multi-Agent Explanation Timeline */}
-          <DecisionTimeline caseData={caseData} />
-        </div>
+          <section className="rounded-2xl border border-line bg-ink-raised p-6">
+            <h2 className="text-sm font-medium text-paper">References</h2>
+            <dl className="mt-3 divide-y divide-line">
+              <Fact label="Case" mono>
+                <span title={caseId}>{shortId(caseId, 13)}</span>
+              </Fact>
+              <Fact label="Transaction" mono>
+                <span title={transaction.id}>{shortId(transaction.id || caseData.transactionId, 13)}</span>
+              </Fact>
+              <Fact label="Model" mono>{ml.modelVersion || '—'}</Fact>
+              <Fact label="Policy" mono>{policy.policyVersion || '—'}</Fact>
+              <Fact label="Rule" mono>
+                <span title={policy.primaryRuleId}>{policy.primaryRuleId || '—'}</span>
+              </Fact>
+            </dl>
+          </section>
+        </aside>
       </div>
 
-      {/* Ask RecoverIQ Interactive Explainer for this specific case */}
-      <AskRecoverIQPanel
-        activeCaseId={caseId}
-        cases={[{ id: caseId, decision: { id: caseId }, transaction }]}
-      />
+      <AskRecoverIQPanel activeCaseId={caseId} cases={[{ id: caseId, decision: { id: caseId }, transaction }]} />
 
-      {/* ------------------------------------------------------------- */}
-      {/* REJECT MODAL                                                  */}
-      {/* ------------------------------------------------------------- */}
       {showRejectModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-md p-6 shadow-2xl space-y-4 animate-in fade-in">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <h3 className="text-base font-bold text-rose-300">Reject Recovery Action</h3>
-              <button
-                onClick={() => setShowRejectModal(false)}
-                className="text-slate-400 hover:text-white text-sm font-bold"
-              >
-                ✕
+        <Modal
+          title="Reject this case"
+          description="No automated or customer-facing action will run for this payment."
+          onClose={() => setShowRejectModal(false)}
+        >
+          <form onSubmit={handleRejectSubmit} className="space-y-5">
+            <label className="block">
+              <span className={labelText}>Reason, saved to the audit trail</span>
+              <textarea
+                rows={3}
+                value={rejectReason}
+                onChange={(e) => setRejectReason(e.target.value)}
+                placeholder="e.g. Customer contacted support directly"
+                className={`${field} mt-2`}
+                required
+              />
+            </label>
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setShowRejectModal(false)} className="rounded-full px-4 py-2 text-sm text-muted hover:text-paper">
+                Cancel
+              </button>
+              <button type="submit" disabled={actionLoading} className="rounded-full bg-stop px-5 py-2 text-sm font-semibold text-ink hover:bg-paper disabled:opacity-50">
+                {actionLoading ? 'Rejecting…' : 'Reject case'}
               </button>
             </div>
-
-            <form onSubmit={handleRejectSubmit} className="space-y-4">
-              <p className="text-xs text-slate-300 leading-relaxed">
-                Rejecting this case will immediately halt all automated recovery interventions for Transaction <code className="text-rose-400">{transaction.id || caseData.transactionId}</code>.
-              </p>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase mb-1.5">
-                  Rejection Reason (Required for Audit Trail)
-                </label>
-                <textarea
-                  rows={3}
-                  value={rejectReason}
-                  onChange={(e) => setRejectReason(e.target.value)}
-                  placeholder="e.g., Customer contacted support directly / Disputed charge / Known fraudulent account"
-                  className="w-full px-3.5 py-2 text-sm bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-rose-500"
-                  required
-                />
-              </div>
-
-              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-800">
-                <button
-                  type="button"
-                  onClick={() => setShowRejectModal(false)}
-                  className="px-4 py-2 text-xs font-semibold text-slate-400 hover:text-white transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={actionLoading}
-                  className="px-5 py-2 text-xs font-semibold bg-rose-600 hover:bg-rose-500 text-white rounded-xl transition-all shadow-md disabled:opacity-50"
-                >
-                  {actionLoading ? 'Rejecting...' : 'Confirm Rejection'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+          </form>
+        </Modal>
       )}
 
-      {/* ------------------------------------------------------------- */}
-      {/* MODIFY ACTION MODAL                                           */}
-      {/* ------------------------------------------------------------- */}
       {showModifyModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-lg p-6 shadow-2xl space-y-5 animate-in fade-in">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <div>
-                <h3 className="text-base font-bold text-slate-100">Modify Recovery Action</h3>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  Select bounded action parameters. Modified actions are re-evaluated by Policy Engine.
-                </p>
-              </div>
-              <button
-                onClick={() => setShowModifyModal(false)}
-                className="text-slate-400 hover:text-white text-sm font-bold"
-              >
-                ✕
-              </button>
-            </div>
+        <Modal
+          title="Change the action"
+          description="Choose a bounded alternative. The policy engine checks it again before it runs."
+          onClose={() => setShowModifyModal(false)}
+        >
+          <form onSubmit={handleModifySubmit} className="space-y-5">
+            {modifyValidationErr && <p className="rounded-lg bg-stop/10 px-3.5 py-2.5 text-sm text-stop">{modifyValidationErr}</p>}
 
-            {modifyValidationErr && (
-              <div className="p-3 bg-rose-950/50 border border-rose-800 text-rose-300 text-xs rounded-xl">
-                ⚠ {modifyValidationErr}
+            <label className="block">
+              <span className={labelText}>Action</span>
+              <select value={modifiedAction} onChange={(e) => setModifiedAction(e.target.value)} className={`${field} mt-2`}>
+                <option value="RETRY_WITH_DISCOUNT">Retry with a discount</option>
+                <option value="SWITCH_GATEWAY">Switch to a fallback gateway</option>
+                <option value="SCHEDULE_RETRY">Schedule a later retry</option>
+                <option value="REQUEST_NEW_PAYMENT_METHOD">Ask for a new payment method</option>
+                <option value="OFFER_ALTERNATIVE_GATEWAY">Offer an alternative gateway</option>
+              </select>
+            </label>
+
+            {modifiedAction === 'RETRY_WITH_DISCOUNT' && (
+              <div className="grid grid-cols-2 gap-4">
+                <label className="block">
+                  <span className={labelText}>Discount (5–30%)</span>
+                  <input type="number" min="5" max="30" value={modifiedDiscount} onChange={(e) => setModifiedDiscount(e.target.value)} className={`${field} mt-2`} />
+                </label>
+                <label className="block">
+                  <span className={labelText}>Channel</span>
+                  <select value={modifiedChannel} onChange={(e) => setModifiedChannel(e.target.value)} className={`${field} mt-2`}>
+                    <option value="email">Email</option>
+                    <option value="sms">SMS</option>
+                    <option value="in_app">In-app</option>
+                  </select>
+                </label>
               </div>
             )}
 
-            <form onSubmit={handleModifySubmit} className="space-y-4">
-              {/* Action Selector */}
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase mb-1.5">Action Strategy</label>
-                <select
-                  value={modifiedAction}
-                  onChange={(e) => setModifiedAction(e.target.value)}
-                  className="w-full px-3.5 py-2.5 text-sm bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-cyan-500"
-                >
-                  <option value="RETRY_WITH_DISCOUNT">RETRY_WITH_DISCOUNT (Discount Incentive & Message)</option>
-                  <option value="SWITCH_GATEWAY">SWITCH_GATEWAY (Alternative Gateway Fallback)</option>
-                  <option value="SCHEDULE_RETRY">SCHEDULE_RETRY (Deferred Gateway Retry)</option>
-                  <option value="REQUEST_NEW_PAYMENT_METHOD">REQUEST_NEW_PAYMENT_METHOD (Self-Service Recovery Link)</option>
-                  <option value="OFFER_ALTERNATIVE_GATEWAY">OFFER_ALTERNATIVE_GATEWAY (Customer Fallback Offer)</option>
+            {modifiedAction === 'SWITCH_GATEWAY' && (
+              <label className="block">
+                <span className={labelText}>Fallback gateway</span>
+                <select value={modifiedGateway} onChange={(e) => setModifiedGateway(e.target.value)} className={`${field} mt-2`}>
+                  <option value="stripe_backup">Stripe backup</option>
+                  <option value="razorpay">Razorpay</option>
+                  <option value="adyen">Adyen secondary</option>
                 </select>
-              </div>
+              </label>
+            )}
 
-              {/* Bounded parameters based on strategy */}
-              {modifiedAction === 'RETRY_WITH_DISCOUNT' && (
-                <div className="grid grid-cols-2 gap-4 p-3 bg-slate-950/50 rounded-xl border border-slate-800">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Discount % (5% - 30%)</label>
-                    <input
-                      type="number"
-                      min="5"
-                      max="30"
-                      value={modifiedDiscount}
-                      onChange={(e) => setModifiedDiscount(e.target.value)}
-                      className="w-full px-3 py-2 text-sm bg-slate-900 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-cyan-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Channel</label>
-                    <select
-                      value={modifiedChannel}
-                      onChange={(e) => setModifiedChannel(e.target.value)}
-                      className="w-full px-3 py-2 text-sm bg-slate-900 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-cyan-500"
-                    >
-                      <option value="email">Email</option>
-                      <option value="sms">SMS</option>
-                      <option value="in_app">In-App Notification</option>
-                    </select>
-                  </div>
-                </div>
-              )}
+            {modifiedAction === 'SCHEDULE_RETRY' && (
+              <label className="block">
+                <span className={labelText}>Delay (1–72 hours)</span>
+                <input type="number" min="1" max="72" value={modifiedDelay} onChange={(e) => setModifiedDelay(e.target.value)} className={`${field} mt-2`} />
+              </label>
+            )}
 
-              {modifiedAction === 'SWITCH_GATEWAY' && (
-                <div className="p-3 bg-slate-950/50 rounded-xl border border-slate-800">
-                  <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Fallback Gateway</label>
-                  <select
-                    value={modifiedGateway}
-                    onChange={(e) => setModifiedGateway(e.target.value)}
-                    className="w-full px-3 py-2 text-sm bg-slate-900 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-cyan-500"
-                  >
-                    <option value="stripe_backup">Stripe Backup Gateway</option>
-                    <option value="razorpay">Razorpay Gateway</option>
-                    <option value="adyen">Adyen Secondary Connector</option>
-                  </select>
-                </div>
-              )}
+            <label className="block">
+              <span className={labelText}>Why this change (required)</span>
+              <textarea
+                rows={2}
+                value={modifyReason}
+                onChange={(e) => setModifyReason(e.target.value)}
+                placeholder="Explain why this strategy fits better"
+                className={`${field} mt-2`}
+                required
+              />
+            </label>
 
-              {modifiedAction === 'SCHEDULE_RETRY' && (
-                <div className="p-3 bg-slate-950/50 rounded-xl border border-slate-800">
-                  <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Retry Delay (1 - 72 Hours)</label>
-                  <input
-                    type="number"
-                    min="1"
-                    max="72"
-                    value={modifiedDelay}
-                    onChange={(e) => setModifiedDelay(e.target.value)}
-                    className="w-full px-3 py-2 text-sm bg-slate-900 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-cyan-500"
-                  />
-                </div>
-              )}
+            <p className="text-xs text-muted">Customer, amount and transaction details cannot be changed.</p>
 
-              {/* Merchant Override Reasoning (Required) */}
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase mb-1.5">
-                  Merchant Override Reason (Required)
-                </label>
-                <textarea
-                  rows={2}
-                  value={modifyReason}
-                  onChange={(e) => setModifyReason(e.target.value)}
-                  placeholder="Explain why this modified strategy was selected..."
-                  className="w-full px-3.5 py-2 text-sm bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-cyan-500"
-                  required
-                />
-              </div>
-
-              {/* Readonly info notice */}
-              <div className="text-[11px] text-slate-500 italic">
-                * Transaction ID, customer data, and amounts are immutable and cannot be modified.
-              </div>
-
-              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-800">
-                <button
-                  type="button"
-                  onClick={() => setShowModifyModal(false)}
-                  className="px-4 py-2 text-xs font-semibold text-slate-400 hover:text-white transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={actionLoading}
-                  className="px-5 py-2 text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl transition-all shadow-md disabled:opacity-50"
-                >
-                  {actionLoading ? 'Saving...' : 'Apply & Re-evaluate'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setShowModifyModal(false)} className="rounded-full px-4 py-2 text-sm text-muted hover:text-paper">
+                Cancel
+              </button>
+              <button type="submit" disabled={actionLoading} className="rounded-full bg-signal px-5 py-2 text-sm font-semibold text-ink hover:bg-paper disabled:opacity-50">
+                {actionLoading ? 'Saving…' : 'Apply and re-check'}
+              </button>
+            </div>
+          </form>
+        </Modal>
       )}
     </div>
   );

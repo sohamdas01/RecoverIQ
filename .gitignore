@@ -96,3 +96,9 @@ redpanda_data/
 # Local AI Assistant Settings
 .claude/
 CLAUDE.local.md
+AGENTS.md
+CLAUDE.md
+
+# Local-only test files (kept out of the repo)
+backend/tests/google-sign-in.test.js
+backend/tests/recovery-outcome-classification.test.js
